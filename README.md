@@ -1,10 +1,11 @@
 # hivectl
 
-This is a template for creating a modern TypeScript library or package using [Bun](https://bun.sh/). It comes pre-configured with essential tools for development, testing, linting, and publishing.
+`hivectl` is a Bun-first CLI for a small set of local and GitHub workflows.
 
 ## Features
 
 *   **Bun-first development**: Leverages Bun for lightning-fast installs, runs, and tests.
+*   **GitHub PR helpers**: Includes `gh-pr-unresolved` for checking unresolved review threads on the pull request for the currently checked out branch.
 *   **TypeScript support**: Write type-safe code from the start.
 *   **Linting & Formatting**: Enforced with [Biome](https://biomejs.dev/) for consistent code style.
 *   **Bundling**: Uses [tsdown](https://tsdown.js.org/) for efficient bundling into ESM and CJS formats, with type declarations.
@@ -14,14 +15,30 @@ This is a template for creating a modern TypeScript library or package using [Bu
 
 ## Getting Started
 
-To use this template, you typically would use a scaffolding tool like `bunx create-something -t hivectl`.
+### Requirements
+
+*   [Bun](https://bun.sh/)
+*   [GitHub CLI](https://cli.github.com/) installed and authenticated for GitHub-backed commands
+*   macOS or Linux
 
 ### Installation
 
-If you're using this template directly (e.g., after cloning), you can install dependencies with Bun:
+Install dependencies with Bun:
 
 ```bash
 bun install
+```
+
+Build the CLI:
+
+```bash
+bun run build
+```
+
+Link the binary locally:
+
+```bash
+bun link
 ```
 
 ### Development
@@ -33,9 +50,51 @@ bun install
 *   **Test**: `bun test`
 *   **Test (Watch Mode)**: `bun run test:watch`
 
+## Commands
+
+### `gh-pr-unresolved`
+
+Checks unresolved GitHub review threads on the pull request for the current branch.
+
+This command is intentionally scoped to local use:
+
+*   Run it from a normal local checkout on a branch that already has an associated PR.
+*   It resolves the PR with `gh pr view` for the current branch and then fetches unresolved review threads from GitHub.
+*   It is not designed for CI, detached HEAD environments, or generalized PR inference across remotes, forks, or SSH aliases.
+
+This scope is deliberate. The command is meant to stay predictable and small rather than accrete fallback logic for rare environments.
+
+Text output always starts with a summary line for the current pull request. When unresolved review threads exist, the default output then prints one clickable comment URL per thread. `-v` or `--verbose` prints one detailed line per thread with the URL, author, file, and preview.
+
+When there are no unresolved threads, the summary line includes the PR lifecycle state when it is no longer open, for example `PR #4 (merged) has 0 unresolved review thread(s): ...`.
+
+Use `--json` for machine-readable output. It returns the pull request metadata, including the PR `state`, a status of `no_pr`, `clean`, or `unresolved`, the unresolved thread list, and the unresolved count.
+
+```bash
+hivectl gh-pr-unresolved
+```
+
+Print detailed thread output:
+
+```bash
+hivectl gh-pr-unresolved -v
+```
+
+Print JSON output:
+
+```bash
+hivectl gh-pr-unresolved --json
+```
+
+Exit codes:
+
+*   `0`: No unresolved review threads
+*   `1`: Unresolved review threads found or an operational error occurred
+*   `2`: No pull request found for the current branch
+
 ### Publishing
 
-This template uses Changesets for versioning and publishing.
+This project uses Changesets for versioning and publishing.
 
 1.  **Add a changeset**:
     ```bash
@@ -59,10 +118,12 @@ This template uses Changesets for versioning and publishing.
 
 ```
 .
-├── src/             # Source code for your library
-│   └── index.ts     # Main entry point for your library
+├── src/             # Source code for the CLI and library exports
+│   ├── cli.ts       # CLI entry point
+│   └── index.ts     # Main library entry point
 ├── test/            # Unit tests
-│   └── index.test.ts # Example test file
+│   ├── cli.test.ts  # CLI tests with a fake gh executable
+│   └── index.test.ts # Library tests
 ├── tsdown.config.ts   # Configuration for tsdown (bundling)
 ├── biome.json       # Biome linter/formatter configuration
 ├── package.json     # Project metadata and scripts
