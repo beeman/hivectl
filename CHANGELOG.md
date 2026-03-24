@@ -1,5 +1,11 @@
 # hivectl
 
+## 0.2.0
+
+### Minor Changes
+
+- 75c8290: Add a `sync-upstream` command to mirror conventional upstream branches to another remote.
+
 ## 0.1.0
 
 ### Minor Changes
