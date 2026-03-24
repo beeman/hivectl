@@ -56,12 +56,22 @@ type PullRequestThread = {
   url: string
 }
 
+type CheckoutState =
+  | {
+      kind: 'branch'
+      ref: string
+    }
+  | {
+      kind: 'detached'
+      ref: string
+    }
+
 type CommandOptions = {
   json?: boolean
   verbose?: boolean
 }
 
-type GhResult = {
+type CommandResult = {
   status: number
   stderr: string
   stdout: string
@@ -80,6 +90,7 @@ type JsonOutput = {
 }
 
 const NO_PR_MESSAGE = 'No pull request found for current branch'
+const NO_SYNCABLE_BRANCHES_EXIT_CODE = 2
 // biome-ignore lint/complexity/useRegexLiterals: The constructor avoids embedding control characters in a regex literal.
 const ANSI_ESCAPE_SEQUENCES = new RegExp(
   String.raw`\u001b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001b\\))`,
@@ -88,6 +99,9 @@ const ANSI_ESCAPE_SEQUENCES = new RegExp(
 // biome-ignore lint/complexity/useRegexLiterals: The constructor avoids embedding control characters in a regex literal.
 const CONTROL_CHARACTERS = new RegExp(String.raw`[\u0000-\u001f\u007f]`, 'gu')
 const MAX_PREVIEW_LENGTH = 120
+const SYNC_UPSTREAM_BRANCHES = ['dev', 'develop', 'main', 'master'] as const
+const SYNC_UPSTREAM_DEFAULT_DESTINATION = 'origin'
+const SYNC_UPSTREAM_DEFAULT_SOURCE = 'upstream'
 const REVIEW_THREADS_QUERY = `
   query($id: ID!, $after: String) {
     node(id: $id) {
@@ -122,7 +136,7 @@ function normalizeOutput(value: string | null | undefined): string {
   return value?.trim() ?? ''
 }
 
-function formatOperationalError(prefix: string, result: GhResult): Error {
+function formatOperationalError(prefix: string, result: CommandResult): Error {
   const detail = normalizeOutput(result.stderr) || normalizeOutput(result.stdout)
 
   return new Error(detail ? `${prefix}: ${detail}` : prefix)
@@ -220,7 +234,7 @@ function sanitizeTerminalText(value: string): string {
   return value.replace(ANSI_ESCAPE_SEQUENCES, '').replace(CONTROL_CHARACTERS, '')
 }
 
-function runGh(args: string[]): GhResult {
+function runGh(args: string[]): CommandResult {
   const result = spawnSync('gh', args, {
     encoding: 'utf8',
     env: process.env,
@@ -241,7 +255,28 @@ function runGh(args: string[]): GhResult {
   }
 }
 
-function isNoPullRequestFailure(result: GhResult): boolean {
+function runGit(args: string[]): CommandResult {
+  const result = spawnSync('git', args, {
+    encoding: 'utf8',
+    env: process.env,
+  })
+
+  if (result.error) {
+    if ('code' in result.error && result.error.code === 'ENOENT') {
+      throw new Error('Failed to run git: git is not installed or not available on PATH')
+    }
+
+    throw new Error(`Failed to run git: ${result.error.message}`)
+  }
+
+  return {
+    status: result.status ?? 1,
+    stderr: result.stderr ?? '',
+    stdout: result.stdout ?? '',
+  }
+}
+
+function isNoPullRequestFailure(result: CommandResult): boolean {
   const detail = `${normalizeOutput(result.stderr)} ${normalizeOutput(result.stdout)}`.toLowerCase()
 
   return (
@@ -446,6 +481,178 @@ function runGhPrUnresolved(options: CommandOptions): number {
   return unresolvedThreads.length > 0 ? 1 : 0
 }
 
+function getAvailableRemotesLabel(remotes: string[]): string {
+  return remotes.length > 0 ? remotes.join(', ') : '(none)'
+}
+
+function getCurrentCheckoutState(): CheckoutState {
+  const branchResult = runGit(['branch', '--show-current'])
+
+  if (branchResult.status !== 0) {
+    throw formatOperationalError('Failed to resolve current checkout', branchResult)
+  }
+
+  const branch = normalizeOutput(branchResult.stdout)
+
+  if (branch.length > 0) {
+    return {
+      kind: 'branch',
+      ref: branch,
+    }
+  }
+
+  const detachedHeadResult = runGit(['rev-parse', '--verify', 'HEAD'])
+
+  if (detachedHeadResult.status !== 0) {
+    throw formatOperationalError('Failed to resolve current checkout', detachedHeadResult)
+  }
+
+  const commit = normalizeOutput(detachedHeadResult.stdout)
+
+  if (commit.length === 0) {
+    throw new Error('Failed to resolve current checkout: HEAD did not resolve to a commit')
+  }
+
+  return {
+    kind: 'detached',
+    ref: commit,
+  }
+}
+
+function getGitRemotes(): string[] {
+  const result = runGit(['remote'])
+
+  if (result.status !== 0) {
+    throw formatOperationalError('Failed to list git remotes', result)
+  }
+
+  return normalizeOutput(result.stdout)
+    .split(/\r?\n/u)
+    .map((remote) => remote.trim())
+    .filter((remote) => remote.length > 0)
+    .sort((left, right) => left.localeCompare(right))
+}
+
+function getSyncRemoteLabel(role: 'destination' | 'source'): string {
+  return role === 'destination' ? 'Destination' : 'Source'
+}
+
+function getSyncableBranches(source: string): string[] {
+  return SYNC_UPSTREAM_BRANCHES.filter((branch) => hasFetchedRemoteBranch(source, branch))
+}
+
+function hasFetchedRemoteBranch(source: string, branch: string): boolean {
+  const ref = `refs/remotes/${source}/${branch}`
+  const result = runGit(['show-ref', '--verify', '--quiet', ref])
+
+  if (result.status === 0) {
+    return true
+  }
+
+  if (result.status === 1) {
+    return false
+  }
+
+  throw formatOperationalError(`Failed to resolve ${source}/${branch}`, result)
+}
+
+function ensureSyncRemoteExists(remote: string, remotes: string[], role: 'destination' | 'source'): void {
+  if (remotes.includes(remote)) {
+    return
+  }
+
+  throw new Error(
+    `${getSyncRemoteLabel(role)} remote "${remote}" not found. Available remotes: ${getAvailableRemotesLabel(remotes)}`,
+  )
+}
+
+function fetchRemote(remote: string): void {
+  const result = runGit(['fetch', remote])
+
+  if (result.status !== 0) {
+    throw formatOperationalError(`Failed to fetch ${remote}`, result)
+  }
+}
+
+function restoreOriginalCheckout(checkoutState: CheckoutState): Error | null {
+  const result =
+    checkoutState.kind === 'branch'
+      ? runGit(['checkout', checkoutState.ref])
+      : runGit(['checkout', '--detach', checkoutState.ref])
+
+  if (result.status === 0) {
+    return null
+  }
+
+  const destination =
+    checkoutState.kind === 'branch' ? `branch "${checkoutState.ref}"` : `detached HEAD at ${checkoutState.ref}`
+
+  return formatOperationalError(`Failed to restore original checkout to ${destination}`, result)
+}
+
+function syncBranch(branch: string, destination: string, source: string): void {
+  const checkoutResult = runGit(['checkout', '-B', branch, `refs/remotes/${source}/${branch}`])
+
+  if (checkoutResult.status !== 0) {
+    throw formatOperationalError(`Failed to check out ${branch} from ${source}/${branch}`, checkoutResult)
+  }
+
+  const pushResult = runGit(['push', destination, `${branch}:${branch}`])
+
+  if (pushResult.status !== 0) {
+    throw formatOperationalError(`Failed to push ${branch} to ${destination}`, pushResult)
+  }
+}
+
+function runSyncUpstream(destinationOption: string | undefined, sourceOption: string | undefined): number {
+  const destination = normalizeOutput(destinationOption) || SYNC_UPSTREAM_DEFAULT_DESTINATION
+  const source = normalizeOutput(sourceOption) || SYNC_UPSTREAM_DEFAULT_SOURCE
+  const remotes = getGitRemotes()
+
+  ensureSyncRemoteExists(destination, remotes, 'destination')
+  ensureSyncRemoteExists(source, remotes, 'source')
+
+  fetchRemote(source)
+
+  const branches = getSyncableBranches(source)
+
+  if (branches.length === 0) {
+    console.log(`No syncable branches found on ${source}. Checked: ${SYNC_UPSTREAM_BRANCHES.join(', ')}`)
+    return NO_SYNCABLE_BRANCHES_EXIT_CODE
+  }
+
+  const originalCheckout = getCurrentCheckoutState()
+  let syncError: Error | null = null
+
+  console.log(`Syncing ${branches.join(', ')} from ${source} to ${destination}`)
+
+  for (const branch of branches) {
+    try {
+      syncBranch(branch, destination, source)
+      console.log(`Synced ${branch} to ${destination}`)
+    } catch (error) {
+      syncError = error instanceof Error ? error : new Error(String(error))
+      break
+    }
+  }
+
+  const restoreError = restoreOriginalCheckout(originalCheckout)
+
+  if (syncError && restoreError) {
+    throw new Error(`${syncError.message}\n${restoreError.message}`)
+  }
+
+  if (syncError) {
+    throw syncError
+  }
+
+  if (restoreError) {
+    throw restoreError
+  }
+
+  return 0
+}
+
 function createProgram(): Command {
   const program = new Command()
 
@@ -458,6 +665,15 @@ function createProgram(): Command {
     .option('-v, --verbose', 'show unresolved review threads in detail')
     .action((options: CommandOptions) => {
       process.exitCode = runGhPrUnresolved(options)
+    })
+
+  program
+    .command('sync-upstream')
+    .description('Sync dev, develop, main, and master from a source remote to a destination remote')
+    .option('--destination <remote>', 'destination remote name', SYNC_UPSTREAM_DEFAULT_DESTINATION)
+    .option('--source <remote>', 'source remote name', SYNC_UPSTREAM_DEFAULT_SOURCE)
+    .action((options: { destination?: string; source?: string }) => {
+      process.exitCode = runSyncUpstream(options.destination, options.source)
     })
 
   return program

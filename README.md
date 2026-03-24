@@ -1,6 +1,6 @@
 # hivectl
 
-`hivectl` is a Bun-first CLI for a small set of local and GitHub workflows.
+`hivectl` is a Bun-first CLI for a small set of local Git and GitHub workflows.
 
 ## Features
 
@@ -18,6 +18,7 @@
 ### Requirements
 
 *   [Bun](https://bun.sh/)
+*   [Git](https://git-scm.com/)
 *   [GitHub CLI](https://cli.github.com/) installed and authenticated for GitHub-backed commands
 *   macOS or Linux
 
@@ -92,6 +93,28 @@ Exit codes:
 *   `1`: Unresolved review threads found or an operational error occurred
 *   `2`: No pull request found for the current branch
 
+### `sync-upstream`
+
+Syncs any of `dev`, `develop`, `main`, and `master` that exist on a source remote to a destination remote, then restores your original checkout.
+
+By default, `sync-upstream` reads from `upstream` and pushes to `origin`. Use `--destination` and `--source` to override either remote name.
+
+```bash
+hivectl sync-upstream
+```
+
+Sync from `source` to `fork` instead:
+
+```bash
+hivectl sync-upstream --destination fork --source source
+```
+
+Exit codes:
+
+*   `0`: At least one conventional branch was synced successfully
+*   `1`: A git or operational error occurred
+*   `2`: No syncable `dev`, `develop`, `main`, or `master` branches were found on the source remote
+
 ### Publishing
 
 This project uses Changesets for versioning and publishing.
@@ -122,7 +145,7 @@ This project uses Changesets for versioning and publishing.
 │   ├── cli.ts       # CLI entry point
 │   └── index.ts     # Main library entry point
 ├── test/            # Unit tests
-│   ├── cli.test.ts  # CLI tests with a fake gh executable
+│   ├── cli.test.ts  # CLI tests with fake gh and git executables
 │   └── index.test.ts # Library tests
 ├── tsdown.config.ts   # Configuration for tsdown (bundling)
 ├── biome.json       # Biome linter/formatter configuration
