@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -65,6 +65,7 @@ beforeAll(() => {
   missingGhDirectory = mkdtempSync(join(tmpdir(), 'hivectl-gh-missing-'))
 
   const fakeGhPath = join(fakeGhDirectory, 'gh')
+  const fakeGitPath = join(fakeGhDirectory, 'git')
   writeFileSync(
     fakeGhPath,
     `#!/usr/bin/env bun
@@ -278,6 +279,146 @@ process.exit(1);
   )
 
   chmodSync(fakeGhPath, 0o755)
+
+  writeFileSync(
+    fakeGitPath,
+    `#!/usr/bin/env bun
+import { appendFileSync } from 'node:fs'
+
+const CURRENT_BRANCH = 'feature/current';
+const DETACHED_HEAD = 'abc123def456';
+const args = process.argv.slice(2);
+const logPath = process.env.HIVECTL_TEST_GIT_LOG;
+const scenario = process.env.HIVECTL_TEST_SCENARIO;
+
+function appendLog() {
+  if (!logPath) {
+    return;
+  }
+
+  appendFileSync(logPath, \`\${args.join(' ')}\\n\`);
+}
+
+function getCurrentBranch() {
+  switch (scenario) {
+    case 'sync-detached':
+      return '';
+    default:
+      return CURRENT_BRANCH;
+  }
+}
+
+function getExistingBranches(remote) {
+  switch (scenario) {
+    case 'sync-custom-remotes':
+      return remote === 'source' ? ['dev', 'develop', 'main', 'master'] : [];
+    case 'sync-detached':
+      return remote === 'upstream' ? ['main'] : [];
+    case 'sync-fail-midway':
+    case 'sync-fail-restore-failure':
+      return remote === 'upstream' ? ['dev', 'develop', 'main', 'master'] : [];
+    case 'sync-none':
+      return [];
+    case 'sync-skip-missing':
+      return remote === 'upstream' ? ['main', 'master'] : [];
+    default:
+      return remote === 'upstream' ? ['dev', 'develop', 'main', 'master'] : [];
+  }
+}
+
+function getRemotes() {
+  switch (scenario) {
+    case 'sync-custom-remotes':
+      return ['fork', 'source'];
+    case 'sync-missing-destination':
+      return ['upstream'];
+    case 'sync-missing-source':
+      return ['origin'];
+    default:
+      return ['origin', 'upstream'];
+  }
+}
+
+function writeStdout(value) {
+  process.stdout.write(value.endsWith('\\n') ? value : \`\${value}\\n\`);
+}
+
+function writeStderr(value) {
+  process.stderr.write(value.endsWith('\\n') ? value : \`\${value}\\n\`);
+}
+
+appendLog();
+
+if (args[0] === 'branch' && args[1] === '--show-current') {
+  const branch = getCurrentBranch();
+
+  if (branch) {
+    writeStdout(branch);
+  }
+
+  process.exit(0);
+}
+
+if (args[0] === 'checkout' && args[1] === '--detach' && args[2] === DETACHED_HEAD) {
+  process.exit(0);
+}
+
+if (args[0] === 'checkout' && args[1] === CURRENT_BRANCH) {
+  if (scenario === 'sync-fail-restore-failure') {
+    writeStderr('could not restore original branch');
+    process.exit(1);
+  }
+
+  process.exit(0);
+}
+
+if (args[0] === 'checkout' && args[1] === '-B') {
+  process.exit(0);
+}
+
+if (args[0] === 'fetch' && args.length === 2) {
+  process.exit(0);
+}
+
+if (args[0] === 'push' && args.length === 3) {
+  if ((scenario === 'sync-fail-midway' || scenario === 'sync-fail-restore-failure') && args[2] === 'main:main') {
+    writeStderr('rejected');
+    process.exit(1);
+  }
+
+  process.exit(0);
+}
+
+if (args[0] === 'remote' && args.length === 1) {
+  writeStdout(getRemotes().join('\\n'));
+  process.exit(0);
+}
+
+if (args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === 'HEAD') {
+  writeStdout(DETACHED_HEAD);
+  process.exit(0);
+}
+
+if (args[0] === 'show-ref' && args[1] === '--verify' && args[2] === '--quiet') {
+  const marker = 'refs/remotes/';
+
+  if (!args[3]?.startsWith(marker)) {
+    writeStderr(\`unexpected ref lookup: \${args[3] ?? 'missing'}\`);
+    process.exit(1);
+  }
+
+  const [remote, branch] = args[3].slice(marker.length).split('/');
+  const exists = getExistingBranches(remote).includes(branch);
+  process.exit(exists ? 0 : 1);
+}
+
+writeStderr(\`unexpected git invocation: \${args.join(' ')}\`);
+process.exit(1);
+`,
+    { mode: 0o755 },
+  )
+
+  chmodSync(fakeGitPath, 0o755)
 })
 
 afterAll(() => {
@@ -304,6 +445,44 @@ function runCli(
       PATH: path,
     },
   })
+}
+
+function readGitLog(logPath: string): string[] {
+  if (!existsSync(logPath)) {
+    return []
+  }
+
+  return readFileSync(logPath, 'utf8')
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+}
+
+function runSyncUpstreamCli(
+  args: string[],
+  scenario: string,
+  path = process.env.PATH ? `${fakeGhDirectory}:${process.env.PATH}` : fakeGhDirectory,
+) {
+  const logDirectory = mkdtempSync(join(tmpdir(), 'hivectl-git-log-'))
+  const logPath = join(logDirectory, 'git.log')
+  const result = spawnSync(process.execPath, ['src/cli.ts', 'sync-upstream', ...args], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      HIVECTL_TEST_GIT_LOG: logPath,
+      HIVECTL_TEST_SCENARIO: scenario,
+      PATH: path,
+    },
+  })
+  const gitLog = readGitLog(logPath)
+
+  rmSync(logDirectory, { force: true, recursive: true })
+
+  return {
+    gitLog,
+    result,
+  }
 }
 
 test('returns exit code 2 when the current branch has no pull request', () => {
@@ -507,4 +686,216 @@ test('returns exit code 1 when gh is not available on PATH', () => {
   expect(result.status).toBe(1)
   expect(result.stdout.trim()).toBe('')
   expect(result.stderr.trim()).toBe('Failed to run gh: gh is not installed or not available on PATH')
+})
+
+test('syncs all available conventional branches in alphabetical order and restores the original branch', () => {
+  const { gitLog, result } = runSyncUpstreamCli([], 'sync-all')
+
+  expect(gitLog).toEqual([
+    'remote',
+    'fetch upstream',
+    'show-ref --verify --quiet refs/remotes/upstream/dev',
+    'show-ref --verify --quiet refs/remotes/upstream/develop',
+    'show-ref --verify --quiet refs/remotes/upstream/main',
+    'show-ref --verify --quiet refs/remotes/upstream/master',
+    'branch --show-current',
+    'checkout -B dev refs/remotes/upstream/dev',
+    'push origin dev:dev',
+    'checkout -B develop refs/remotes/upstream/develop',
+    'push origin develop:develop',
+    'checkout -B main refs/remotes/upstream/main',
+    'push origin main:main',
+    'checkout -B master refs/remotes/upstream/master',
+    'push origin master:master',
+    'checkout feature/current',
+  ])
+  expect(result.status).toBe(0)
+  expect(result.stdout.trim()).toBe(
+    [
+      'Syncing dev, develop, main, master from upstream to origin',
+      'Synced dev to origin',
+      'Synced develop to origin',
+      'Synced main to origin',
+      'Synced master to origin',
+    ].join('\n'),
+  )
+  expect(result.stderr.trim()).toBe('')
+})
+
+test('skips missing conventional branches and succeeds when at least one exists', () => {
+  const { gitLog, result } = runSyncUpstreamCli([], 'sync-skip-missing')
+
+  expect(gitLog).toEqual([
+    'remote',
+    'fetch upstream',
+    'show-ref --verify --quiet refs/remotes/upstream/dev',
+    'show-ref --verify --quiet refs/remotes/upstream/develop',
+    'show-ref --verify --quiet refs/remotes/upstream/main',
+    'show-ref --verify --quiet refs/remotes/upstream/master',
+    'branch --show-current',
+    'checkout -B main refs/remotes/upstream/main',
+    'push origin main:main',
+    'checkout -B master refs/remotes/upstream/master',
+    'push origin master:master',
+    'checkout feature/current',
+  ])
+  expect(result.status).toBe(0)
+  expect(result.stdout.trim()).toBe(
+    ['Syncing main, master from upstream to origin', 'Synced main to origin', 'Synced master to origin'].join('\n'),
+  )
+  expect(result.stderr.trim()).toBe('')
+})
+
+test('returns exit code 2 when no syncable conventional branches exist', () => {
+  const { gitLog, result } = runSyncUpstreamCli([], 'sync-none')
+
+  expect(gitLog).toEqual([
+    'remote',
+    'fetch upstream',
+    'show-ref --verify --quiet refs/remotes/upstream/dev',
+    'show-ref --verify --quiet refs/remotes/upstream/develop',
+    'show-ref --verify --quiet refs/remotes/upstream/main',
+    'show-ref --verify --quiet refs/remotes/upstream/master',
+  ])
+  expect(result.status).toBe(2)
+  expect(result.stdout.trim()).toBe('No syncable branches found on upstream. Checked: dev, develop, main, master')
+  expect(result.stderr.trim()).toBe('')
+})
+
+test('fails cleanly when the source remote is missing', () => {
+  const { gitLog, result } = runSyncUpstreamCli([], 'sync-missing-source')
+
+  expect(gitLog).toEqual(['remote'])
+  expect(result.status).toBe(1)
+  expect(result.stdout.trim()).toBe('')
+  expect(result.stderr.trim()).toBe('Source remote "upstream" not found. Available remotes: origin')
+})
+
+test('fails cleanly when the destination remote is missing', () => {
+  const { gitLog, result } = runSyncUpstreamCli([], 'sync-missing-destination')
+
+  expect(gitLog).toEqual(['remote'])
+  expect(result.status).toBe(1)
+  expect(result.stdout.trim()).toBe('')
+  expect(result.stderr.trim()).toBe('Destination remote "origin" not found. Available remotes: upstream')
+})
+
+test('supports custom source and destination remotes', () => {
+  const { gitLog, result } = runSyncUpstreamCli(['--destination', 'fork', '--source', 'source'], 'sync-custom-remotes')
+
+  expect(gitLog).toEqual([
+    'remote',
+    'fetch source',
+    'show-ref --verify --quiet refs/remotes/source/dev',
+    'show-ref --verify --quiet refs/remotes/source/develop',
+    'show-ref --verify --quiet refs/remotes/source/main',
+    'show-ref --verify --quiet refs/remotes/source/master',
+    'branch --show-current',
+    'checkout -B dev refs/remotes/source/dev',
+    'push fork dev:dev',
+    'checkout -B develop refs/remotes/source/develop',
+    'push fork develop:develop',
+    'checkout -B main refs/remotes/source/main',
+    'push fork main:main',
+    'checkout -B master refs/remotes/source/master',
+    'push fork master:master',
+    'checkout feature/current',
+  ])
+  expect(result.status).toBe(0)
+  expect(result.stdout.trim()).toBe(
+    [
+      'Syncing dev, develop, main, master from source to fork',
+      'Synced dev to fork',
+      'Synced develop to fork',
+      'Synced main to fork',
+      'Synced master to fork',
+    ].join('\n'),
+  )
+  expect(result.stderr.trim()).toBe('')
+})
+
+test('restores a detached HEAD after a successful sync', () => {
+  const { gitLog, result } = runSyncUpstreamCli([], 'sync-detached')
+
+  expect(gitLog).toEqual([
+    'remote',
+    'fetch upstream',
+    'show-ref --verify --quiet refs/remotes/upstream/dev',
+    'show-ref --verify --quiet refs/remotes/upstream/develop',
+    'show-ref --verify --quiet refs/remotes/upstream/main',
+    'show-ref --verify --quiet refs/remotes/upstream/master',
+    'branch --show-current',
+    'rev-parse --verify HEAD',
+    'checkout -B main refs/remotes/upstream/main',
+    'push origin main:main',
+    'checkout --detach abc123def456',
+  ])
+  expect(result.status).toBe(0)
+  expect(result.stdout.trim()).toBe(['Syncing main from upstream to origin', 'Synced main to origin'].join('\n'))
+  expect(result.stderr.trim()).toBe('')
+})
+
+test('attempts to restore the original checkout after a mid-sync failure', () => {
+  const { gitLog, result } = runSyncUpstreamCli([], 'sync-fail-midway')
+
+  expect(gitLog).toEqual([
+    'remote',
+    'fetch upstream',
+    'show-ref --verify --quiet refs/remotes/upstream/dev',
+    'show-ref --verify --quiet refs/remotes/upstream/develop',
+    'show-ref --verify --quiet refs/remotes/upstream/main',
+    'show-ref --verify --quiet refs/remotes/upstream/master',
+    'branch --show-current',
+    'checkout -B dev refs/remotes/upstream/dev',
+    'push origin dev:dev',
+    'checkout -B develop refs/remotes/upstream/develop',
+    'push origin develop:develop',
+    'checkout -B main refs/remotes/upstream/main',
+    'push origin main:main',
+    'checkout feature/current',
+  ])
+  expect(result.status).toBe(1)
+  expect(result.stdout.trim()).toBe(
+    [
+      'Syncing dev, develop, main, master from upstream to origin',
+      'Synced dev to origin',
+      'Synced develop to origin',
+    ].join('\n'),
+  )
+  expect(result.stderr.trim()).toBe('Failed to push main to origin: rejected')
+})
+
+test('surfaces restore failures alongside sync failures', () => {
+  const { gitLog, result } = runSyncUpstreamCli([], 'sync-fail-restore-failure')
+
+  expect(gitLog).toEqual([
+    'remote',
+    'fetch upstream',
+    'show-ref --verify --quiet refs/remotes/upstream/dev',
+    'show-ref --verify --quiet refs/remotes/upstream/develop',
+    'show-ref --verify --quiet refs/remotes/upstream/main',
+    'show-ref --verify --quiet refs/remotes/upstream/master',
+    'branch --show-current',
+    'checkout -B dev refs/remotes/upstream/dev',
+    'push origin dev:dev',
+    'checkout -B develop refs/remotes/upstream/develop',
+    'push origin develop:develop',
+    'checkout -B main refs/remotes/upstream/main',
+    'push origin main:main',
+    'checkout feature/current',
+  ])
+  expect(result.status).toBe(1)
+  expect(result.stdout.trim()).toBe(
+    [
+      'Syncing dev, develop, main, master from upstream to origin',
+      'Synced dev to origin',
+      'Synced develop to origin',
+    ].join('\n'),
+  )
+  expect(result.stderr.trim()).toBe(
+    [
+      'Failed to push main to origin: rejected',
+      'Failed to restore original checkout to branch "feature/current": could not restore original branch',
+    ].join('\n'),
+  )
 })
