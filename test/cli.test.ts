@@ -287,6 +287,8 @@ import { appendFileSync } from 'node:fs'
 
 const CURRENT_BRANCH = 'feature/current';
 const DETACHED_HEAD = 'abc123def456';
+const CURRENT_TREE = 'tree-current';
+const DETACHED_TREE = 'tree-detached';
 const args = process.argv.slice(2);
 const logPath = process.env.HIVECTL_TEST_GIT_LOG;
 const scenario = process.env.HIVECTL_TEST_SCENARIO;
@@ -302,6 +304,7 @@ function appendLog() {
 function getCurrentBranch() {
   switch (scenario) {
     case 'sync-detached':
+    case 'sync-merged-detached':
       return '';
     default:
       return CURRENT_BRANCH;
@@ -324,6 +327,32 @@ function getExistingBranches(remote) {
     default:
       return remote === 'upstream' ? ['dev', 'develop', 'main', 'master'] : [];
   }
+}
+
+function getExistingLocalBranches() {
+  switch (scenario) {
+    case 'sync-merged-detached':
+      return ['beeman/alpha', 'beeman/beta'];
+    default:
+      return ['beeman/alpha', 'beeman/beta', 'beeman/unmerged', 'beeman/unrelated', CURRENT_BRANCH];
+  }
+}
+
+function getTreeHash(ref) {
+  switch (ref) {
+    case \`\${CURRENT_BRANCH}^{tree}\`:
+      return CURRENT_TREE;
+    case \`\${DETACHED_HEAD}^{tree}\`:
+      return DETACHED_TREE;
+    default:
+      return '';
+  }
+}
+
+function getMergeTree(base, branch) {
+  const baseTree = getTreeHash(\`\${base}^{tree}\`);
+
+  return branch === 'beeman/unmerged' ? 'tree-unmerged' : baseTree;
 }
 
 function getRemotes() {
@@ -359,12 +388,24 @@ if (args[0] === 'branch' && args[1] === '--show-current') {
   process.exit(0);
 }
 
+if (args[0] === 'branch' && args[1] === '-f' && args.length === 4) {
+  if (
+    (scenario === 'sync-merged-fail-midway' || scenario === 'sync-merged-fail-restore-failure') &&
+    args[2] === 'beeman/beta'
+  ) {
+    writeStderr('conflict');
+    process.exit(1);
+  }
+
+  process.exit(0);
+}
+
 if (args[0] === 'checkout' && args[1] === '--detach' && args[2] === DETACHED_HEAD) {
   process.exit(0);
 }
 
 if (args[0] === 'checkout' && args[1] === CURRENT_BRANCH) {
-  if (scenario === 'sync-fail-restore-failure') {
+  if (scenario === 'sync-fail-restore-failure' || scenario === 'sync-merged-fail-restore-failure') {
     writeStderr('could not restore original branch');
     process.exit(1);
   }
@@ -377,6 +418,11 @@ if (args[0] === 'checkout' && args[1] === '-B') {
 }
 
 if (args[0] === 'fetch' && args.length === 2) {
+  process.exit(0);
+}
+
+if (args[0] === 'for-each-ref' && args[1] === '--format=%(refname:short)' && args[2] === 'refs/heads') {
+  writeStdout(getExistingLocalBranches().sort().join('\\n'));
   process.exit(0);
 }
 
@@ -399,17 +445,51 @@ if (args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === 'HEAD') {
   process.exit(0);
 }
 
-if (args[0] === 'show-ref' && args[1] === '--verify' && args[2] === '--quiet') {
-  const marker = 'refs/remotes/';
+if (args[0] === 'rev-parse' && args.length === 2 && args[1].endsWith('^{tree}')) {
+  const tree = getTreeHash(args[1]);
 
-  if (!args[3]?.startsWith(marker)) {
-    writeStderr(\`unexpected ref lookup: \${args[3] ?? 'missing'}\`);
+  if (!tree) {
+    writeStderr(\`unexpected tree lookup: \${args[1]}\`);
     process.exit(1);
   }
 
-  const [remote, branch] = args[3].slice(marker.length).split('/');
-  const exists = getExistingBranches(remote).includes(branch);
-  process.exit(exists ? 0 : 1);
+  writeStdout(tree);
+  process.exit(0);
+}
+
+if (args[0] === 'show-ref' && args[1] === '--verify' && args[2] === '--quiet') {
+  const localMarker = 'refs/heads/';
+  const remoteMarker = 'refs/remotes/';
+
+  if (args[3]?.startsWith(localMarker)) {
+    const branch = args[3].slice(localMarker.length);
+    const exists = getExistingLocalBranches().includes(branch);
+    process.exit(exists ? 0 : 1);
+  }
+
+  if (args[3]?.startsWith(remoteMarker)) {
+    const [remote, branch] = args[3].slice(remoteMarker.length).split('/');
+    const exists = getExistingBranches(remote).includes(branch);
+    process.exit(exists ? 0 : 1);
+  }
+
+  writeStderr(\`unexpected ref lookup: \${args[3] ?? 'missing'}\`);
+  process.exit(1);
+}
+
+if (args[0] === 'merge-tree' && args[1] === '--write-tree' && args.length === 4) {
+  if (args[3] === 'beeman/unrelated') {
+    writeStderr('fatal: refusing to merge unrelated histories');
+    process.exit(128);
+  }
+
+  const output = getMergeTree(args[2], args[3]);
+
+  if (output) {
+    writeStdout(output);
+  }
+
+  process.exit(args[3] === 'beeman/unmerged' ? 1 : 0);
 }
 
 writeStderr(\`unexpected git invocation: \${args.join(' ')}\`);
@@ -466,6 +546,33 @@ function runSyncUpstreamCli(
   const logDirectory = mkdtempSync(join(tmpdir(), 'hivectl-git-log-'))
   const logPath = join(logDirectory, 'git.log')
   const result = spawnSync(process.execPath, ['src/cli.ts', 'sync-upstream', ...args], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      HIVECTL_TEST_GIT_LOG: logPath,
+      HIVECTL_TEST_SCENARIO: scenario,
+      PATH: path,
+    },
+  })
+  const gitLog = readGitLog(logPath)
+
+  rmSync(logDirectory, { force: true, recursive: true })
+
+  return {
+    gitLog,
+    result,
+  }
+}
+
+function runSyncMergedBranchesCli(
+  args: string[],
+  scenario: string,
+  path = process.env.PATH ? `${fakeGhDirectory}:${process.env.PATH}` : fakeGhDirectory,
+) {
+  const logDirectory = mkdtempSync(join(tmpdir(), 'hivectl-git-log-'))
+  const logPath = join(logDirectory, 'git.log')
+  const result = spawnSync(process.execPath, ['src/cli.ts', 'sync-merged-branches', ...args], {
     cwd: ROOT,
     encoding: 'utf8',
     env: {
@@ -686,6 +793,167 @@ test('returns exit code 1 when gh is not available on PATH', () => {
   expect(result.status).toBe(1)
   expect(result.stdout.trim()).toBe('')
   expect(result.stderr.trim()).toBe('Failed to run gh: gh is not installed or not available on PATH')
+})
+
+test('fails cleanly in non-interactive mode when no branches are provided', () => {
+  const { gitLog, result } = runSyncMergedBranchesCli([], 'sync-merged-all')
+
+  expect(gitLog).toEqual([
+    'branch --show-current',
+    'rev-parse feature/current^{tree}',
+    'for-each-ref --format=%(refname:short) refs/heads',
+    'merge-tree --write-tree feature/current beeman/alpha',
+    'merge-tree --write-tree feature/current beeman/beta',
+    'merge-tree --write-tree feature/current beeman/unmerged',
+    'merge-tree --write-tree feature/current beeman/unrelated',
+  ])
+  expect(result.status).toBe(1)
+  expect(result.stdout.trim()).toBe('')
+  expect(result.stderr.trim()).toBe('sync-merged-branches requires an interactive TTY when no branches are provided')
+})
+
+test('syncs named squash-merged local branches in alphabetical order and deduplicates them', () => {
+  const { gitLog, result } = runSyncMergedBranchesCli(['beeman/beta', 'beeman/alpha', 'beeman/beta'], 'sync-merged-all')
+
+  expect(gitLog).toEqual([
+    'branch --show-current',
+    'rev-parse feature/current^{tree}',
+    'show-ref --verify --quiet refs/heads/beeman/alpha',
+    'merge-tree --write-tree feature/current beeman/alpha',
+    'show-ref --verify --quiet refs/heads/beeman/beta',
+    'merge-tree --write-tree feature/current beeman/beta',
+    'branch -f beeman/alpha feature/current',
+    'branch -f beeman/beta feature/current',
+  ])
+  expect(result.status).toBe(0)
+  expect(result.stdout.trim()).toBe(
+    [
+      'Syncing beeman/alpha, beeman/beta to feature/current',
+      'Synced beeman/alpha to feature/current',
+      'Synced beeman/beta to feature/current',
+    ].join('\n'),
+  )
+  expect(result.stderr.trim()).toBe('')
+})
+
+test('uses a stable detached base across multiple branch updates', () => {
+  const { gitLog, result } = runSyncMergedBranchesCli(['beeman/beta', 'beeman/alpha'], 'sync-merged-detached')
+
+  expect(gitLog).toEqual([
+    'branch --show-current',
+    'rev-parse --verify HEAD',
+    'rev-parse abc123def456^{tree}',
+    'show-ref --verify --quiet refs/heads/beeman/alpha',
+    'merge-tree --write-tree abc123def456 beeman/alpha',
+    'show-ref --verify --quiet refs/heads/beeman/beta',
+    'merge-tree --write-tree abc123def456 beeman/beta',
+    'branch -f beeman/alpha abc123def456',
+    'branch -f beeman/beta abc123def456',
+  ])
+  expect(result.status).toBe(0)
+  expect(result.stdout.trim()).toBe(
+    [
+      'Syncing beeman/alpha, beeman/beta to abc123def456',
+      'Synced beeman/alpha to abc123def456',
+      'Synced beeman/beta to abc123def456',
+    ].join('\n'),
+  )
+  expect(result.stderr.trim()).toBe('')
+})
+
+test('fails before updating when a local branch does not exist', () => {
+  const { gitLog, result } = runSyncMergedBranchesCli(['beeman/missing'], 'sync-merged-all')
+
+  expect(gitLog).toEqual([
+    'branch --show-current',
+    'rev-parse feature/current^{tree}',
+    'show-ref --verify --quiet refs/heads/beeman/missing',
+  ])
+  expect(result.status).toBe(1)
+  expect(result.stdout.trim()).toBe('')
+  expect(result.stderr.trim()).toBe('Local branch "beeman/missing" not found')
+})
+
+test('fails before updating when asked to sync the current branch', () => {
+  const { gitLog, result } = runSyncMergedBranchesCli(['feature/current'], 'sync-merged-all')
+
+  expect(gitLog).toEqual(['branch --show-current', 'rev-parse feature/current^{tree}'])
+  expect(result.status).toBe(1)
+  expect(result.stdout.trim()).toBe('')
+  expect(result.stderr.trim()).toBe('Cannot sync current branch "feature/current" to itself')
+})
+
+test('fails before updating when a branch is not fully merged into the current base', () => {
+  const { gitLog, result } = runSyncMergedBranchesCli(['beeman/unmerged', 'beeman/beta'], 'sync-merged-unmerged')
+
+  expect(gitLog).toEqual([
+    'branch --show-current',
+    'rev-parse feature/current^{tree}',
+    'show-ref --verify --quiet refs/heads/beeman/beta',
+    'merge-tree --write-tree feature/current beeman/beta',
+    'show-ref --verify --quiet refs/heads/beeman/unmerged',
+    'merge-tree --write-tree feature/current beeman/unmerged',
+  ])
+  expect(result.status).toBe(1)
+  expect(result.stdout.trim()).toBe('')
+  expect(result.stderr.trim()).toBe('Local branch "beeman/unmerged" is not fully merged into feature/current')
+})
+
+test('fails before updating when a branch has unrelated history', () => {
+  const { gitLog, result } = runSyncMergedBranchesCli(['beeman/unrelated'], 'sync-merged-all')
+
+  expect(gitLog).toEqual([
+    'branch --show-current',
+    'rev-parse feature/current^{tree}',
+    'show-ref --verify --quiet refs/heads/beeman/unrelated',
+    'merge-tree --write-tree feature/current beeman/unrelated',
+  ])
+  expect(result.status).toBe(1)
+  expect(result.stdout.trim()).toBe('')
+  expect(result.stderr.trim()).toBe('Local branch "beeman/unrelated" is not fully merged into feature/current')
+})
+
+test('stops after a branch update failure', () => {
+  const { gitLog, result } = runSyncMergedBranchesCli(['beeman/beta', 'beeman/alpha'], 'sync-merged-fail-midway')
+
+  expect(gitLog).toEqual([
+    'branch --show-current',
+    'rev-parse feature/current^{tree}',
+    'show-ref --verify --quiet refs/heads/beeman/alpha',
+    'merge-tree --write-tree feature/current beeman/alpha',
+    'show-ref --verify --quiet refs/heads/beeman/beta',
+    'merge-tree --write-tree feature/current beeman/beta',
+    'branch -f beeman/alpha feature/current',
+    'branch -f beeman/beta feature/current',
+  ])
+  expect(result.status).toBe(1)
+  expect(result.stdout.trim()).toBe(
+    ['Syncing beeman/alpha, beeman/beta to feature/current', 'Synced beeman/alpha to feature/current'].join('\n'),
+  )
+  expect(result.stderr.trim()).toBe('Failed to move beeman/beta to feature/current: conflict')
+})
+
+test('does not try to restore the original checkout after a branch update failure', () => {
+  const { gitLog, result } = runSyncMergedBranchesCli(
+    ['beeman/beta', 'beeman/alpha'],
+    'sync-merged-fail-restore-failure',
+  )
+
+  expect(gitLog).toEqual([
+    'branch --show-current',
+    'rev-parse feature/current^{tree}',
+    'show-ref --verify --quiet refs/heads/beeman/alpha',
+    'merge-tree --write-tree feature/current beeman/alpha',
+    'show-ref --verify --quiet refs/heads/beeman/beta',
+    'merge-tree --write-tree feature/current beeman/beta',
+    'branch -f beeman/alpha feature/current',
+    'branch -f beeman/beta feature/current',
+  ])
+  expect(result.status).toBe(1)
+  expect(result.stdout.trim()).toBe(
+    ['Syncing beeman/alpha, beeman/beta to feature/current', 'Synced beeman/alpha to feature/current'].join('\n'),
+  )
+  expect(result.stderr.trim()).toBe('Failed to move beeman/beta to feature/current: conflict')
 })
 
 test('syncs all available conventional branches in alphabetical order and restores the original branch', () => {

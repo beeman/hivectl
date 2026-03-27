@@ -3,6 +3,7 @@
     "hivectl": "dist/cli.mjs"
   },
   "dependencies": {
+    "@crustjs/prompts": "^0.0.10",
     "commander": "^14.0.3"
   },
   "devDependencies": {

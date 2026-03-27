@@ -5,6 +5,7 @@
     "": {
       "name": "hivectl",
       "dependencies": {
+        "@crustjs/prompts": "^0.0.10",
         "commander": "^14.0.3",
       },
       "devDependencies": {
@@ -93,6 +94,10 @@
     "@changesets/types": ["@changesets/types@6.1.0", "", {}, "sha512-rKQcJ+o1nKNgeoYRHKOS07tAMNd3YSN0uHaJOZYjBAgxfV7TUE7JE+z4BzZdQwb5hKaYbayKN5KrYV7ODb2rAA=="],
 
     "@changesets/write": ["@changesets/write@0.4.0", "", { "dependencies": { "@changesets/types": "^6.1.0", "fs-extra": "^7.0.1", "human-id": "^4.1.1", "prettier": "^2.7.1" } }, "sha512-CdTLvIOPiCNuH71pyDu3rA+Q0n65cmAbXnwWH84rKGiFumFzkmHNT8KHTMEchcxN+Kl8I54xGUhJ7l3E7X396Q=="],
+
+    "@crustjs/prompts": ["@crustjs/prompts@0.0.10", "", { "dependencies": { "@crustjs/style": "0.0.6" }, "peerDependencies": { "typescript": "^5" } }, "sha512-NC9D0E4xEWfD8PHxgYjE775q5Om8KMydu1IEo9VMA76cvI1eJe5DjO+AL5ybOIupy8mRtDiErd3//1ZtEW+XYA=="],
+
+    "@crustjs/style": ["@crustjs/style@0.0.6", "", { "peerDependencies": { "typescript": "^5" } }, "sha512-GB15j1g/IeOa+ZhacHOzEj9D7TKDFJ2axdwvTCyyfl3U1c+tbi+gBs+2HWmExDjEDhuN3ABwuUlLMljTUlxI4w=="],
 
     "@emnapi/core": ["@emnapi/core@1.8.1", "", { "dependencies": { "@emnapi/wasi-threads": "1.1.0", "tslib": "^2.4.0" } }, "sha512-AvT9QFpxK0Zd8J0jopedNm+w/2fIzvtPKPjqyw9jwvBaReTTqPBk9Hixaz7KbjimP+QNz605/XnjFcDAL2pqBg=="],
 

@@ -93,6 +93,40 @@ Exit codes:
 *   `1`: Unresolved review threads found or an operational error occurred
 *   `2`: No pull request found for the current branch
 
+### `sync-merged-branches`
+
+Moves one or more named local branches to your current checkout so squash-merged branches can be deleted with `git branch -d`.
+
+This command is intentionally scoped to local cleanup:
+
+*   Run it from the updated branch you want to delete into, typically `main`.
+*   If you omit branch names, it opens an interactive multiselect prompt of local branches that are already syncable into the current checkout.
+*   You can still pass explicit local branch names when you want a non-interactive run.
+*   It does not call `gh`, fetch remotes, delete branches, or adjust upstream tracking.
+*   It validates that every named branch is already effectively merged into the current checkout before updating any branch.
+*   Omitting branch names requires an interactive TTY.
+
+```bash
+hivectl sync-merged-branches
+```
+
+Or pass branch names directly:
+
+```bash
+hivectl sync-merged-branches beeman/foo beeman/bar
+```
+
+Typical workflow:
+
+1.  Update `main`.
+2.  Run `hivectl sync-merged-branches` and choose branches, or pass branch names directly.
+3.  Run `git branch -d beeman/foo beeman/bar`.
+
+Exit codes:
+
+*   `0`: All requested local branches were synced successfully
+*   `1`: A validation or git error occurred
+
 ### `sync-upstream`
 
 Syncs any of `dev`, `develop`, `main`, and `master` that exist on a source remote to a destination remote, then restores your original checkout.
