@@ -4,13 +4,16 @@
   },
   "dependencies": {
     "@crustjs/prompts": "^0.0.10",
-    "commander": "^14.0.3"
+    "commander": "^14.0.3",
+    "js-yaml": "^4.1.1",
+    "tinyglobby": "^0.2.16"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.6",
     "@changesets/cli": "^2.29.8",
     "@intellectronica/ruler": "^0.3.34",
     "@types/bun": "^1.3.9",
+    "@types/js-yaml": "^4.0.9",
     "pkg-pr-new": "^0.0.62",
     "publint": "^0.3.16",
     "tsdown": "^0.20.3"

@@ -5,6 +5,7 @@
 ## Features
 
 *   **Bun-first development**: Leverages Bun for lightning-fast installs, runs, and tests.
+*   **Dependency inspection**: Includes `deps list` for listing direct, catalog, and workspace dependency specs across a package or workspace.
 *   **GitHub PR helpers**: Includes `gh-pr-unresolved` for checking unresolved review threads on the pull request for the currently checked out branch.
 *   **TypeScript support**: Write type-safe code from the start.
 *   **Linting & Formatting**: Enforced with [Biome](https://biomejs.dev/) for consistent code style.
@@ -52,6 +53,69 @@ bun link
 *   **Test (Watch Mode)**: `bun run test:watch`
 
 ## Commands
+
+### `deps`
+
+Inspects and manages dependency specs for a single package or workspace.
+
+`deps list` is intentionally read-only:
+
+*   It works in plain package projects, npm or Bun `package.json` workspaces, and pnpm `pnpm-workspace.yaml` workspaces.
+*   It includes the root `package.json` first, then workspace package files alphabetically.
+*   It groups dependency entries as `workspace`, `catalog`, and `direct`.
+*   It does not resolve `catalog:` entries to concrete versions.
+*   It can suggest repeated direct dependencies that may be good catalog candidates.
+*   It does not support Yarn projects.
+
+Inspect the current directory:
+
+```bash
+hivectl deps list
+```
+
+Inspect another directory:
+
+```bash
+hivectl deps list /path/to/repo
+```
+
+Print JSON output:
+
+```bash
+hivectl deps list --json
+```
+
+Print catalog suggestions:
+
+```bash
+hivectl deps list --suggest
+```
+
+Suggestion output includes:
+
+*   Direct dependencies that already match an existing catalog entry.
+*   Direct dependencies repeated with the same version in at least two packages.
+*   Direct dependencies with version drift across packages.
+*   A note for npm projects, because npm workspaces do not support `catalog:` dependency specs.
+
+Pin dependency specs to exact versions and configure future installs to save exact versions:
+
+```bash
+hivectl deps pin
+```
+
+Preview pin changes without writing files:
+
+```bash
+hivectl deps pin --dry-run
+```
+
+`deps pin` updates exact semver-like dependency specs in `dependencies`, `devDependencies`, `optionalDependencies`, `peerDependencies`, and root catalog definitions. It preserves `workspace:` and `catalog:` references unchanged, and reports file, URL, alias, and unsupported range specs as skipped. It configures exact future installs with `[install] exact = true` in `bunfig.toml` for Bun projects and `save-exact=true` in `.npmrc` for npm and pnpm projects. When pnpm catalog values in `pnpm-workspace.yaml` change, the file is written as normalized YAML, which may not preserve comments or original quoting.
+
+Exit codes:
+
+*   `0`: Dependency command completed successfully
+*   `1`: A package, workspace, parse, or unsupported-project error occurred
 
 ### `gh-pr-unresolved`
 
