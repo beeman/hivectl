@@ -1,5 +1,12 @@
 # hivectl
 
+## 0.3.0
+
+### Minor Changes
+
+- bce672d: Add a `gh-pin-actions` command for pinning external GitHub Actions references to latest stable SemVer commit SHAs.
+- e0e45d3: Add a `sync-merged-branches` command for rebasing squash-merged local branches onto the current checkout.
+
 ## 0.2.0
 
 ### Minor Changes
