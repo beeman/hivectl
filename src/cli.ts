@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { join, resolve, sep } from 'node:path'
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { join, relative, resolve, sep } from 'node:path'
 import { CancelledError, multiselect, NonInteractiveError } from '@crustjs/prompts'
 import { Command, CommanderError } from 'commander'
 import { dump as dumpYaml, load as loadYaml } from 'js-yaml'
@@ -78,6 +78,58 @@ type SuggestedVersionUsage = {
   count: number
   locations: DependencyLocation[]
   version: string
+}
+
+type ActionRef = {
+  actionPath: string
+  file: string
+  lineNumber: number
+  prefix: string
+  quote: string
+  ref: string
+  repoKey: string
+  value: string
+}
+
+type GhPinActionsMode = 'check' | 'dry_run' | 'write'
+
+type GhPinActionsOptions = {
+  apiUrl?: string
+  check?: boolean
+  dryRun?: boolean
+  githubTokenEnv?: string
+  includePrereleases?: boolean
+  json?: boolean
+  maxTagPages?: number
+}
+
+type GhPinActionsJsonOutput = {
+  actions: GhPinActionsJsonOutputAction[]
+  changedByFile: Record<string, number>
+  fileCount: number
+  mode: GhPinActionsMode
+  status: 'no_files' | 'unchanged' | 'updated' | 'would_update'
+  totalChanged: number
+  uniqueActionCount: number
+}
+
+type GhPinActionsJsonOutputAction = {
+  actionPath: string
+  repoKey: string
+  sha: string
+  tag: string
+}
+
+type GitHubRefObject = {
+  sha?: unknown
+  type?: unknown
+  url?: unknown
+}
+
+type ResolvedAction = {
+  repoKey: string
+  sha: string
+  tag: string
 }
 
 type ReviewComment = {
@@ -216,8 +268,13 @@ type JsonOutput = {
   unresolvedCount: number
 }
 
+type SemverSortKey = [number, number, number, number, number, string]
+
+const GH_PIN_ACTIONS_DEFAULT_API_URL = 'https://api.github.com'
+const GH_PIN_ACTIONS_DEFAULT_MAX_TAG_PAGES = 25
 const NO_PR_MESSAGE = 'No pull request found for current branch'
 const NO_SYNCABLE_BRANCHES_EXIT_CODE = 2
+const NO_YAML_FILES_EXIT_CODE = 2
 // biome-ignore lint/complexity/useRegexLiterals: The constructor avoids embedding control characters in a regex literal.
 const ANSI_ESCAPE_SEQUENCES = new RegExp(
   String.raw`\u001b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001b\\))`,
@@ -240,9 +297,13 @@ const PINNABLE_VERSION = new RegExp(
   'u',
 )
 const MAX_PREVIEW_LENGTH = 120
+const SHA_RE = /^[0-9a-f]{40}$/iu
 const SYNC_UPSTREAM_BRANCHES = ['dev', 'develop', 'main', 'master'] as const
 const SYNC_UPSTREAM_DEFAULT_DESTINATION = 'origin'
 const SYNC_UPSTREAM_DEFAULT_SOURCE = 'upstream'
+const SEMVER_RE =
+  /^v?(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<patch>0|[1-9]\d*)(?<prerelease>-[0-9A-Za-z.-]+)?(?<build>\+[0-9A-Za-z.-]+)?$/u
+const USES_RE = /^(\s*(?:-\s*)?uses\s*:\s*)(['"]?)([^'"\s#]+)\2([ \t]*(?:#.*)?)(\r?\n?)$/u
 const REVIEW_THREADS_QUERY = `
   query($id: ID!, $after: String) {
     node(id: $id) {
@@ -1439,6 +1500,595 @@ function sanitizeTerminalText(value: string): string {
   return value.replace(ANSI_ESCAPE_SEQUENCES, '').replace(CONTROL_CHARACTERS, '')
 }
 
+class GitHubJsonApi {
+  private readonly apiUrl: string
+  private readonly token: string | undefined
+
+  constructor(apiUrl: string, token: string | undefined) {
+    this.apiUrl = apiUrl.replace(/\/+$/u, '')
+    this.token = token
+  }
+
+  async getJson(pathOrUrl: string): Promise<unknown> {
+    const url =
+      pathOrUrl.startsWith('https://') || pathOrUrl.startsWith('http://')
+        ? pathOrUrl
+        : `${this.apiUrl}/${pathOrUrl.replace(/^\/+/u, '')}`
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'hivectl-gh-pin-actions',
+      'X-GitHub-Api-Version': '2022-11-28',
+    }
+
+    if (this.token) {
+      headers.Authorization = `Bearer ${this.token}`
+    }
+
+    let response: Response
+
+    try {
+      response = await fetch(url, { headers })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+
+      throw new Error(`GitHub API request failed for ${url}: ${message}`)
+    }
+
+    const body = await response.text()
+
+    if (!response.ok) {
+      throw new Error(`GitHub API ${response.status} for ${url}: ${body}`)
+    }
+
+    return parseJson<unknown>(body, `Failed to parse GitHub API response for ${url}`)
+  }
+}
+
+function isYamlFile(path: string): boolean {
+  const normalizedPath = path.toLowerCase()
+
+  return normalizedPath.endsWith('.yaml') || normalizedPath.endsWith('.yml')
+}
+
+function findYamlFiles(directory: string): string[] {
+  const files: string[] = []
+  const entries = readdirSync(directory, { withFileTypes: true }).sort((left, right) =>
+    left.name.localeCompare(right.name),
+  )
+
+  for (const entry of entries) {
+    const path = join(directory, entry.name)
+
+    if (entry.isDirectory()) {
+      files.push(...findYamlFiles(path))
+      continue
+    }
+
+    if (entry.isFile() && isYamlFile(path)) {
+      files.push(path)
+    }
+  }
+
+  return files
+}
+
+function yamlFilesForTarget(rawTarget: string): string[] {
+  const target = resolve(rawTarget)
+
+  if (!existsSync(target)) {
+    return []
+  }
+
+  const stats = statSync(target)
+
+  if (stats.isFile()) {
+    return isYamlFile(target) ? [target] : []
+  }
+
+  if (!stats.isDirectory()) {
+    return []
+  }
+
+  const scanRoot =
+    existsSync(join(target, '.github')) && statSync(join(target, '.github')).isDirectory()
+      ? join(target, '.github')
+      : target
+
+  return findYamlFiles(scanRoot)
+}
+
+function discoverYamlFiles(targets: string[]): string[] {
+  const files = new Map<string, string>()
+
+  for (const target of targets) {
+    for (const file of yamlFilesForTarget(target)) {
+      files.set(file, file)
+    }
+  }
+
+  return [...files.keys()].sort((left, right) => left.localeCompare(right))
+}
+
+function parseUsesLine(file: string, line: string, lineNumber: number): ActionRef | null {
+  const match = USES_RE.exec(line)
+
+  if (!match) {
+    return null
+  }
+
+  const prefix = match[1] ?? ''
+  const quote = match[2] ?? ''
+  const value = match[3] ?? ''
+  const separatorIndex = value.lastIndexOf('@')
+
+  if (separatorIndex <= 0 || separatorIndex === value.length - 1) {
+    return null
+  }
+
+  const actionPath = value.slice(0, separatorIndex)
+  const ref = value.slice(separatorIndex + 1)
+
+  if (
+    actionPath.startsWith('./') ||
+    actionPath.startsWith('../') ||
+    actionPath.startsWith('/') ||
+    actionPath.startsWith('docker://')
+  ) {
+    return null
+  }
+
+  const parts = actionPath.split('/')
+
+  if (parts.length < 2 || !parts[0] || !parts[1]) {
+    return null
+  }
+
+  return {
+    actionPath,
+    file,
+    lineNumber,
+    prefix,
+    quote,
+    ref,
+    repoKey: `${parts[0]}/${parts[1]}`.toLowerCase(),
+    value,
+  }
+}
+
+function splitLinesKeepEnds(value: string): string[] {
+  return value.length === 0 ? [] : value.split(/(?<=\n)/u)
+}
+
+function discoverActionRefs(files: string[]): ActionRef[] {
+  const refs: ActionRef[] = []
+
+  for (const file of files) {
+    const lines = splitLinesKeepEnds(readFileSync(file, 'utf8'))
+
+    for (const [index, line] of lines.entries()) {
+      const actionRef = parseUsesLine(file, line, index + 1)
+
+      if (actionRef) {
+        refs.push(actionRef)
+      }
+    }
+  }
+
+  return refs.sort((left, right) => {
+    const fileComparison = left.file.localeCompare(right.file)
+
+    if (fileComparison !== 0) {
+      return fileComparison
+    }
+
+    if (left.lineNumber !== right.lineNumber) {
+      return left.lineNumber - right.lineNumber
+    }
+
+    return left.actionPath.localeCompare(right.actionPath)
+  })
+}
+
+function parseSemver(tag: string, includePrereleases: boolean): SemverSortKey | null {
+  const match = SEMVER_RE.exec(tag)
+
+  if (!match?.groups) {
+    return null
+  }
+
+  const prerelease = match.groups.prerelease ?? ''
+
+  if (prerelease && !includePrereleases) {
+    return null
+  }
+
+  return [
+    Number(match.groups.major),
+    Number(match.groups.minor),
+    Number(match.groups.patch),
+    prerelease ? 0 : 1,
+    tag.startsWith('v') ? 1 : 0,
+    tag,
+  ]
+}
+
+function compareSemverSortKeys(left: SemverSortKey, right: SemverSortKey): number {
+  for (let index = 0; index < left.length; index += 1) {
+    const leftValue = left[index]
+    const rightValue = right[index]
+
+    if (typeof leftValue === 'number' && typeof rightValue === 'number' && leftValue !== rightValue) {
+      return leftValue - rightValue
+    }
+
+    if (typeof leftValue === 'string' && typeof rightValue === 'string' && leftValue !== rightValue) {
+      return leftValue.localeCompare(rightValue)
+    }
+  }
+
+  return 0
+}
+
+async function latestSemverTag(
+  api: GitHubJsonApi,
+  repoKey: string,
+  includePrereleases: boolean,
+  maxTagPages: number,
+): Promise<string> {
+  const candidates: Array<{ key: SemverSortKey; tag: string }> = []
+  const ownerRepo = encodeRepoPath(repoKey)
+
+  for (let page = 1; page <= maxTagPages; page += 1) {
+    const tags = await api.getJson(`/repos/${ownerRepo}/tags?per_page=100&page=${page}`)
+
+    if (!Array.isArray(tags)) {
+      throw new Error(`Unexpected tag response for ${repoKey}`)
+    }
+
+    if (tags.length === 0) {
+      break
+    }
+
+    for (const tag of tags) {
+      const name = typeof tag === 'object' && tag && 'name' in tag ? tag.name : null
+
+      if (typeof name !== 'string') {
+        continue
+      }
+
+      const key = parseSemver(name, includePrereleases)
+
+      if (key) {
+        candidates.push({ key, tag: name })
+      }
+    }
+
+    if (tags.length < 100) {
+      break
+    }
+  }
+
+  if (candidates.length === 0) {
+    const exact = includePrereleases ? 'exact SemVer' : 'stable exact SemVer'
+
+    throw new Error(`No ${exact} tag found for ${repoKey}`)
+  }
+
+  candidates.sort((left, right) => compareSemverSortKeys(left.key, right.key))
+
+  return candidates[candidates.length - 1]?.tag ?? ''
+}
+
+function encodeRepoPath(repoKey: string): string {
+  return repoKey
+    .split('/')
+    .map((part) => encodeURIComponent(part))
+    .join('/')
+}
+
+function getGitHubRefObject(value: unknown, context: string): GitHubRefObject {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    !('object' in value) ||
+    !value.object ||
+    typeof value.object !== 'object'
+  ) {
+    throw new Error(context)
+  }
+
+  return value.object as GitHubRefObject
+}
+
+async function resolveTagSha(api: GitHubJsonApi, repoKey: string, tag: string): Promise<string> {
+  const ownerRepo = encodeRepoPath(repoKey)
+  const encodedTag = encodeURIComponent(tag)
+  let object = getGitHubRefObject(
+    await api.getJson(`/repos/${ownerRepo}/git/ref/tags/${encodedTag}`),
+    `Unexpected ref response for ${repoKey}@${tag}`,
+  )
+  const seen = new Set<string>()
+
+  while (object.type === 'tag') {
+    const url = object.url
+
+    if (typeof url !== 'string' || seen.has(url)) {
+      throw new Error(`Could not dereference annotated tag for ${repoKey}@${tag}`)
+    }
+
+    seen.add(url)
+    object = getGitHubRefObject(await api.getJson(url), `Unexpected tag object response for ${repoKey}@${tag}`)
+  }
+
+  if (typeof object.sha !== 'string' || !SHA_RE.test(object.sha)) {
+    throw new Error(`Could not resolve commit SHA for ${repoKey}@${tag}`)
+  }
+
+  return object.sha
+}
+
+async function resolveActions(
+  refs: ActionRef[],
+  api: GitHubJsonApi,
+  includePrereleases: boolean,
+  maxTagPages: number,
+): Promise<Map<string, ResolvedAction>> {
+  const resolved = new Map<string, ResolvedAction>()
+  const repoKeys = [...new Set(refs.map((ref) => ref.repoKey))].sort((left, right) => left.localeCompare(right))
+
+  for (const repoKey of repoKeys) {
+    const tag = await latestSemverTag(api, repoKey, includePrereleases, maxTagPages)
+    const sha = await resolveTagSha(api, repoKey, tag)
+
+    resolved.set(repoKey, {
+      repoKey,
+      sha,
+      tag,
+    })
+  }
+
+  return resolved
+}
+
+function getLineEnding(line: string): string {
+  if (line.endsWith('\r\n')) {
+    return '\r\n'
+  }
+
+  return line.endsWith('\n') ? '\n' : ''
+}
+
+function rewriteFile(file: string, resolved: Map<string, ResolvedAction>, write: boolean): number {
+  const lines = splitLinesKeepEnds(readFileSync(file, 'utf8'))
+  const newLines: string[] = []
+  let changed = 0
+
+  for (const [index, line] of lines.entries()) {
+    const actionRef = parseUsesLine(file, line, index + 1)
+
+    if (!actionRef) {
+      newLines.push(line)
+      continue
+    }
+
+    const resolvedAction = resolved.get(actionRef.repoKey)
+
+    if (!resolvedAction) {
+      throw new Error(`Missing resolved action for ${actionRef.repoKey}`)
+    }
+
+    const newline = getLineEnding(line)
+    const newValue = `${actionRef.actionPath}@${resolvedAction.sha}`
+    const newLine = `${actionRef.prefix}${actionRef.quote}${newValue}${actionRef.quote} # ${resolvedAction.tag}${newline}`
+
+    if (newLine !== line) {
+      changed += 1
+    }
+
+    newLines.push(newLine)
+  }
+
+  if (changed > 0 && write) {
+    writeFileSync(file, newLines.join(''), 'utf8')
+  }
+
+  return changed
+}
+
+function formatDisplayPath(file: string): string {
+  const relativePath = relative(process.cwd(), file)
+
+  return relativePath.length > 0 && !relativePath.startsWith('..') ? relativePath : file
+}
+
+function getChangedByFileObject(changedByFile: Map<string, number>): Record<string, number> {
+  const output: Record<string, number> = {}
+
+  for (const [file, changed] of [...changedByFile.entries()].sort((left, right) => left[0].localeCompare(right[0]))) {
+    output[formatDisplayPath(file)] = changed
+  }
+
+  return output
+}
+
+function getUniqueActionPaths(refs: ActionRef[]): string[] {
+  return [...new Set(refs.map((ref) => ref.actionPath))].sort((left, right) => left.localeCompare(right))
+}
+
+function getGhPinActionsMode(options: GhPinActionsOptions): GhPinActionsMode {
+  if (options.check) {
+    return 'check'
+  }
+
+  if (options.dryRun) {
+    return 'dry_run'
+  }
+
+  return 'write'
+}
+
+function getGhPinActionsStatus(
+  fileCount: number,
+  mode: GhPinActionsMode,
+  totalChanged: number,
+): GhPinActionsJsonOutput['status'] {
+  if (fileCount === 0) {
+    return 'no_files'
+  }
+
+  if (totalChanged === 0) {
+    return 'unchanged'
+  }
+
+  return mode === 'write' ? 'updated' : 'would_update'
+}
+
+function getGhPinActionsJsonOutput(
+  refs: ActionRef[],
+  resolved: Map<string, ResolvedAction>,
+  changedByFile: Map<string, number>,
+  fileCount: number,
+  mode: GhPinActionsMode,
+): GhPinActionsJsonOutput {
+  const actionPaths = getUniqueActionPaths(refs)
+  const totalChanged = [...changedByFile.values()].reduce((total, changed) => total + changed, 0)
+
+  return {
+    actions: actionPaths.map((actionPath) => {
+      const repoKey = actionPath.split('/').slice(0, 2).join('/').toLowerCase()
+      const resolvedAction = resolved.get(repoKey)
+
+      return {
+        actionPath,
+        repoKey,
+        sha: resolvedAction?.sha ?? '',
+        tag: resolvedAction?.tag ?? '',
+      }
+    }),
+    changedByFile: getChangedByFileObject(changedByFile),
+    fileCount,
+    mode,
+    status: getGhPinActionsStatus(fileCount, mode, totalChanged),
+    totalChanged,
+    uniqueActionCount: actionPaths.length,
+  }
+}
+
+function printGhPinActionsJsonOutput(
+  refs: ActionRef[],
+  resolved: Map<string, ResolvedAction>,
+  changedByFile: Map<string, number>,
+  fileCount: number,
+  mode: GhPinActionsMode,
+): void {
+  console.log(JSON.stringify(getGhPinActionsJsonOutput(refs, resolved, changedByFile, fileCount, mode), null, 2))
+}
+
+function printGhPinActionsSummary(
+  refs: ActionRef[],
+  resolved: Map<string, ResolvedAction>,
+  changedByFile: Map<string, number>,
+  mode: GhPinActionsMode,
+): void {
+  const actionPaths = getUniqueActionPaths(refs)
+  const files = new Set(refs.map((ref) => ref.file))
+
+  console.log(`Found ${actionPaths.length} unique action uses in ${files.size} files.`)
+
+  if (actionPaths.length > 0) {
+    console.log('\nActions:')
+
+    for (const actionPath of actionPaths) {
+      const repoKey = actionPath.split('/').slice(0, 2).join('/').toLowerCase()
+      const resolvedAction = resolved.get(repoKey)
+
+      if (!resolvedAction) {
+        throw new Error(`Missing resolved action for ${repoKey}`)
+      }
+
+      console.log(`  ${actionPath} -> ${resolvedAction.tag} @ ${resolvedAction.sha}`)
+    }
+  }
+
+  const totalChanged = [...changedByFile.values()].reduce((total, changed) => total + changed, 0)
+  const label = mode === 'write' ? 'Updated' : 'Would update'
+
+  console.log(`\n${label} ${totalChanged} uses lines across ${changedByFile.size} files.`)
+
+  for (const [file, changed] of [...changedByFile.entries()].sort((left, right) => left[0].localeCompare(right[0]))) {
+    console.log(`  ${formatDisplayPath(file)}: ${changed}`)
+  }
+}
+
+function parsePositiveInteger(value: string): number {
+  const parsed = Number(value)
+
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`Expected a positive integer, received "${value}"`)
+  }
+
+  return parsed
+}
+
+async function runGhPinActions(targetArguments: string[] | undefined, options: GhPinActionsOptions): Promise<number> {
+  const mode = getGhPinActionsMode(options)
+  const write = mode === 'write'
+  const targets = targetArguments && targetArguments.length > 0 ? targetArguments : ['.']
+  const files = discoverYamlFiles(targets)
+  const emptyResolved = new Map<string, ResolvedAction>()
+  const emptyChangedByFile = new Map<string, number>()
+
+  if (files.length === 0) {
+    if (options.json) {
+      printGhPinActionsJsonOutput([], emptyResolved, emptyChangedByFile, 0, mode)
+      return NO_YAML_FILES_EXIT_CODE
+    }
+
+    console.error('No .github YAML files found.')
+    return NO_YAML_FILES_EXIT_CODE
+  }
+
+  const refs = discoverActionRefs(files)
+
+  if (refs.length === 0) {
+    if (options.json) {
+      printGhPinActionsJsonOutput(refs, emptyResolved, emptyChangedByFile, files.length, mode)
+      return 0
+    }
+
+    console.log('No external GitHub action uses references found.')
+    return 0
+  }
+
+  const api = new GitHubJsonApi(
+    normalizeOutput(options.apiUrl) || GH_PIN_ACTIONS_DEFAULT_API_URL,
+    process.env[normalizeOutput(options.githubTokenEnv) || 'GITHUB_TOKEN'],
+  )
+  const resolved = await resolveActions(
+    refs,
+    api,
+    Boolean(options.includePrereleases),
+    options.maxTagPages ?? GH_PIN_ACTIONS_DEFAULT_MAX_TAG_PAGES,
+  )
+  const changedByFile = new Map<string, number>()
+
+  for (const file of files) {
+    const changed = rewriteFile(file, resolved, write)
+
+    if (changed > 0) {
+      changedByFile.set(file, changed)
+    }
+  }
+
+  if (options.json) {
+    printGhPinActionsJsonOutput(refs, resolved, changedByFile, files.length, mode)
+  } else {
+    printGhPinActionsSummary(refs, resolved, changedByFile, mode)
+  }
+
+  return options.check && changedByFile.size > 0 ? 1 : 0
+}
+
 function runGh(args: string[]): CommandResult {
   const result = spawnSync('gh', args, {
     encoding: 'utf8',
@@ -2075,6 +2725,25 @@ function createProgram(): Command {
     .option('--json', 'show pin changes as JSON')
     .action(async function (this: Command, root: string | undefined) {
       process.exitCode = await runDepsPin(root, this.opts<DepsPinCommandOptions>())
+    })
+
+  program
+    .command('gh-pin-actions [targets...]')
+    .description('Pin external GitHub Actions uses references to latest stable SemVer commit SHAs')
+    .option('--api-url <url>', 'GitHub API base URL', GH_PIN_ACTIONS_DEFAULT_API_URL)
+    .option('--check', 'exit with a failure when updates would be made without writing files')
+    .option('--dry-run', 'print planned updates without writing files')
+    .option('--github-token-env <name>', 'environment variable containing a GitHub API token', 'GITHUB_TOKEN')
+    .option('--include-prereleases', 'allow SemVer prerelease or build-metadata tags')
+    .option('--json', 'show pinning results as JSON')
+    .option(
+      '--max-tag-pages <number>',
+      'maximum 100-tag pages to inspect per repository',
+      parsePositiveInteger,
+      GH_PIN_ACTIONS_DEFAULT_MAX_TAG_PAGES,
+    )
+    .action(async (targets: string[] | undefined, options: GhPinActionsOptions) => {
+      process.exitCode = await runGhPinActions(targets, options)
     })
 
   program

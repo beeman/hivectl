@@ -6,6 +6,7 @@
 
 *   **Bun-first development**: Leverages Bun for lightning-fast installs, runs, and tests.
 *   **Dependency inspection**: Includes `deps list` for listing direct, catalog, and workspace dependency specs across a package or workspace.
+*   **GitHub Actions pinning**: Includes `gh-pin-actions` for pinning external GitHub Actions references to commit SHAs.
 *   **GitHub PR helpers**: Includes `gh-pr-unresolved` for checking unresolved review threads on the pull request for the currently checked out branch.
 *   **TypeScript support**: Write type-safe code from the start.
 *   **Linting & Formatting**: Enforced with [Biome](https://biomejs.dev/) for consistent code style.
@@ -116,6 +117,67 @@ Exit codes:
 
 *   `0`: Dependency command completed successfully
 *   `1`: A package, workspace, parse, or unsupported-project error occurred
+
+### `gh-pin-actions`
+
+Pins external GitHub Actions `uses:` references in `.github` YAML files to the latest stable exact SemVer tag SHA.
+
+This command is intentionally scoped to GitHub action references:
+
+*   It scans `.github/**/*.yml` and `.github/**/*.yaml` by default.
+*   It accepts repository roots, `.github` directories, directories, and individual YAML files as targets.
+*   It updates only external action references shaped like `owner/repo[/path]@ref`.
+*   It skips local actions such as `./.github/actions/foo` and Docker actions such as `docker://...`.
+
+Updated lines use this format:
+
+```yaml
+uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+```
+
+```bash
+hivectl gh-pin-actions
+```
+
+Preview changes without writing files:
+
+```bash
+hivectl gh-pin-actions --dry-run
+```
+
+Check whether updates are needed without writing files:
+
+```bash
+hivectl gh-pin-actions --check
+```
+
+Allow prerelease or build-metadata SemVer tags:
+
+```bash
+hivectl gh-pin-actions --include-prereleases
+```
+
+Print JSON output:
+
+```bash
+hivectl gh-pin-actions --json
+```
+
+Options:
+
+*   `--api-url <url>`: GitHub API base URL. Defaults to `https://api.github.com`.
+*   `--check`: Exit with a failure when updates would be made, without writing files.
+*   `--dry-run`: Print planned updates without writing files.
+*   `--github-token-env <name>`: Environment variable containing a GitHub API token. Defaults to `GITHUB_TOKEN`.
+*   `--include-prereleases`: Allow SemVer prerelease or build-metadata tags.
+*   `--json`: Print machine-readable output.
+*   `--max-tag-pages <number>`: Maximum 100-tag pages to inspect per repository. Defaults to `25`.
+
+Exit codes:
+
+*   `0`: Success, or no changes needed in `--check` mode
+*   `1`: Updates needed in `--check` mode, GitHub/API failure, parse failure, or write failure
+*   `2`: No matching `.github` YAML files found
 
 ### `gh-pr-unresolved`
 
