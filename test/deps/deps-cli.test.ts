@@ -268,6 +268,49 @@ test('supports pnpm workspace yaml package patterns and excludes', () => {
   }
 })
 
+test('excludes package json files matched by root gitignore patterns', () => {
+  const directory = createDepsFixture()
+
+  try {
+    writePackageJson(directory, {
+      name: 'gitignore-workspace',
+      packageManager: 'pnpm@10.0.0',
+    })
+    writeFileSync(join(directory, '.gitignore'), ['dist', '.nx/cache', ''].join('\n'))
+    writeFileSync(join(directory, 'pnpm-workspace.yaml'), ['ignoredBuiltDependencies:', '  - nx', ''].join('\n'))
+    writePackageJson(join(directory, 'apps/web'), {
+      dependencies: {
+        react: '^19.0.0',
+      },
+      name: '@workspace/web',
+    })
+    writePackageJson(join(directory, '.nx/cache/123/dist/libs/sdk'), {
+      dependencies: {
+        graphql: '^16.6.0',
+      },
+      name: '@workspace/cached-sdk',
+    })
+    writePackageJson(join(directory, 'dist/libs/sdk'), {
+      dependencies: {
+        graphql: '^16.6.0',
+      },
+      name: '@workspace/dist-sdk',
+    })
+
+    const result = runDepsCli(['list', '--json'], directory)
+    const output = JSON.parse(result.stdout)
+
+    expect(result.status).toBe(0)
+    expect(output.packages.map((packageReport: { path: string }) => packageReport.path)).toEqual([
+      'package.json',
+      'apps/web/package.json',
+    ])
+    expect(result.stderr.trim()).toBe('')
+  } finally {
+    rmSync(directory, { force: true, recursive: true })
+  }
+})
+
 test('prefers pnpm workspace detection over Bun lockfile heuristics', () => {
   const directory = createDepsFixture()
 

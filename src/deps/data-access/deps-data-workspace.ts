@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
+import { globby } from 'globby'
 import { load as loadYaml } from 'js-yaml'
-import { glob } from 'tinyglobby'
 import {
   sharedDataReadTextFile as readTextFile,
   sharedDataWriteTextFile as writeTextFile,
@@ -339,9 +339,10 @@ async function getWorkspacePackageJsonPaths(
     return [PACKAGE_JSON]
   }
 
-  const matches = await glob(workspacePatterns.include, {
+  const matches = await globby(workspacePatterns.include, {
     cwd: root,
     dot: true,
+    gitignore: true,
     ignore: workspacePatterns.ignore,
     onlyFiles: true,
   })
