@@ -1,5 +1,15 @@
 # hivectl
 
+## 0.4.0
+
+### Minor Changes
+
+- 1bc9c67: Add gh-issues sync, list, and search commands for caching GitHub issues and comments locally.
+
+### Patch Changes
+
+- f2c0269: Respect gitignore patterns when discovering workspace package.json files for deps list.
+
 ## 0.3.0
 
 ### Minor Changes
