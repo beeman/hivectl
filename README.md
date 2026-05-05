@@ -7,6 +7,7 @@
 *   **Bun-first development**: Leverages Bun for lightning-fast installs, runs, and tests.
 *   **Dependency inspection**: Includes `deps list` for listing direct, catalog, and workspace dependency specs across a package or workspace.
 *   **GitHub Actions pinning**: Includes `gh-pin-actions` for pinning external GitHub Actions references to commit SHAs.
+*   **GitHub issue cache**: Includes `gh-issues` for syncing GitHub issues and comments into a local searchable cache.
 *   **GitHub PR helpers**: Includes `gh-pr-unresolved` for checking unresolved review threads on the pull request for the currently checked out branch.
 *   **TypeScript support**: Write type-safe code from the start.
 *   **Linting & Formatting**: Enforced with [Biome](https://biomejs.dev/) for consistent code style.
@@ -178,6 +179,90 @@ Exit codes:
 *   `0`: Success, or no changes needed in `--check` mode
 *   `1`: Updates needed in `--check` mode, GitHub/API failure, parse failure, or write failure
 *   `2`: No matching `.github` YAML files found
+
+### `gh-issues`
+
+Syncs GitHub issues and comments into `.hivectl/gh-issues/` inside the current repository, then lists or searches that cache without calling the GitHub API.
+
+`gh-issues sync` is designed to be polite to API limits:
+
+*   It writes one JSON file per issue, including comments.
+*   It stores a sync cursor and only asks GitHub for issues updated since the last sync.
+*   It skips pull requests returned by the GitHub issues endpoint.
+*   It appends `.hivectl/gh-issues/` to `.git/info/exclude` when that cache path is not already covered, and prints that it did so.
+*   It looks for tokens in `--github-token-env`, `HIVECTL_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, then `gh auth token`.
+
+Repository detection uses Git remotes. When more than one GitHub remote is available, the command prompts for one with `upstream` first and `origin` second. In non-interactive runs, pass `--remote` or `--repo`.
+
+```bash
+hivectl gh-issues sync
+```
+
+Sync from a specific remote:
+
+```bash
+hivectl gh-issues sync --remote upstream
+```
+
+Force a full refresh:
+
+```bash
+hivectl gh-issues sync --force
+```
+
+Search the local cache:
+
+```bash
+hivectl gh-issues search "rate limit"
+```
+
+List cached issues with local filters:
+
+```bash
+hivectl gh-issues list --author alice --tag bug --keyword wallet
+```
+
+Print JSON output:
+
+```bash
+hivectl gh-issues list --status closed --json
+hivectl gh-issues sync --json
+hivectl gh-issues search "rate limit" --json
+```
+
+Options for `sync`:
+
+*   `--api-url <url>`: GitHub API base URL. Defaults to `https://api.github.com` for GitHub.com remotes and `https://<hostname>/api/v3` for GitHub Enterprise-style remotes.
+*   `--force`: Sync all issues instead of only issues updated since the previous sync.
+*   `--github-token-env <name>`: Environment variable containing a GitHub API token.
+*   `--json`: Print machine-readable output.
+*   `--remote <remote>`: Git remote to use for repository detection.
+*   `--repo <owner/repo>`: GitHub repository to sync instead of detecting from remotes.
+
+Options for `list`:
+
+*   `--author <login>`: Filter by issue author.
+*   `--json`: Print machine-readable output.
+*   `--keyword <query>`: Filter by keyword in issue titles, bodies, labels, or comments.
+*   `--max-results <number>`: Maximum listed issues to print. Defaults to `50`.
+*   `--remote <remote>`: Git remote to use for repository detection.
+*   `--repo <owner/repo>`: GitHub repository to list instead of detecting from remotes.
+*   `--status <status>`: Filter by issue status: `all`, `closed`, or `open`. Defaults to `open`.
+*   `--tag <tag>`: Filter by label/tag. Repeat for multiple tags.
+*   `--updated-after <date>`: Filter by updated-at date or ISO timestamp.
+
+Options for `search`:
+
+*   `--json`: Print machine-readable output.
+*   `--max-results <number>`: Maximum search results to print. Defaults to `20`.
+*   `--remote <remote>`: Git remote to use for repository detection.
+*   `--repo <owner/repo>`: GitHub repository to search instead of detecting from remotes.
+
+Exit codes:
+
+*   `0`: Sync succeeded, or list/search found matches
+*   `1`: List/search found no matches, or an operational error occurred
+*   `2`: List/search cache was missing
 
 ### `gh-pr-unresolved`
 

@@ -2,6 +2,7 @@
 
 import { Command, CommanderError } from 'commander'
 import { depsCommand } from './deps/deps-command.ts'
+import { ghIssuesCommand } from './gh-issues/gh-issues-command.ts'
 import { ghPinActionsCommand } from './gh-pin-actions/gh-pin-actions-command.ts'
 import { ghPrUnresolvedCommand } from './gh-pr-unresolved/gh-pr-unresolved-command.ts'
 import { syncMergedBranchesCommand } from './sync-merged-branches/sync-merged-branches-command.ts'
@@ -12,6 +13,7 @@ function createProgram(): Command {
 
   program.name('hivectl').description('Common local and GitHub workflow helpers').exitOverride()
   program.addCommand(depsCommand())
+  program.addCommand(ghIssuesCommand())
   program.addCommand(ghPinActionsCommand())
   program.addCommand(ghPrUnresolvedCommand())
   program.addCommand(syncMergedBranchesCommand())

@@ -203,6 +203,10 @@ function writeStderr(value) {
   process.stderr.write(value.endsWith('\\n') ? value : \`\${value}\\n\`);
 }
 
+function writeStdout(value) {
+  process.stdout.write(value.endsWith('\\n') ? value : \`\${value}\\n\`);
+}
+
 function getFormValue(name) {
   const marker = \`\${name}=\`;
 
@@ -273,6 +277,16 @@ if (args[0] === 'api' && args[1] === 'graphql') {
   }
 }
 
+if (args[0] === 'auth' && args[1] === 'token') {
+  if (process.env.HIVECTL_TEST_GH_AUTH_TOKEN) {
+    writeStdout(process.env.HIVECTL_TEST_GH_AUTH_TOKEN);
+    process.exit(0);
+  }
+
+  writeStderr('not authenticated');
+  process.exit(1);
+}
+
 writeStderr(\`unexpected gh invocation: \${args.join(' ')}\`);
 process.exit(1);
 `,
@@ -290,6 +304,7 @@ const CURRENT_BRANCH = 'feature/current';
 const DETACHED_HEAD = 'abc123def456';
 const CURRENT_TREE = 'tree-current';
 const DETACHED_TREE = 'tree-detached';
+const TEST_REPO_ROOT = process.env.HIVECTL_TEST_REPO_ROOT ?? process.cwd();
 const args = process.argv.slice(2);
 const logPath = process.env.HIVECTL_TEST_GIT_LOG;
 const scenario = process.env.HIVECTL_TEST_SCENARIO;
@@ -358,6 +373,8 @@ function getMergeTree(base, branch) {
 
 function getRemotes() {
   switch (scenario) {
+    case 'gh-issues-single-origin':
+      return ['origin'];
     case 'sync-custom-remotes':
       return ['fork', 'source'];
     case 'sync-missing-destination':
@@ -366,6 +383,25 @@ function getRemotes() {
       return ['origin'];
     default:
       return ['origin', 'upstream'];
+  }
+}
+
+function getRemoteUrl(remote) {
+  switch (remote) {
+    case 'fork':
+      return 'git@github.com:beeman/fork.git';
+    case 'mirror':
+      return 'https://gitlab.com/beeman/hivectl.git';
+    case 'origin':
+      return scenario === 'gh-issues-single-origin'
+        ? 'https://github.com/beeman/hivectl.git'
+        : 'git@github.com:beeman/fork.git';
+    case 'source':
+      return 'https://github.com/beeman/source.git';
+    case 'upstream':
+      return 'https://github.com/beeman/hivectl.git';
+    default:
+      return '';
   }
 }
 
@@ -438,6 +474,28 @@ if (args[0] === 'push' && args.length === 3) {
 
 if (args[0] === 'remote' && args.length === 1) {
   writeStdout(getRemotes().join('\\n'));
+  process.exit(0);
+}
+
+if (args[0] === 'remote' && args[1] === 'get-url' && args.length === 3) {
+  const remoteUrl = getRemoteUrl(args[2]);
+
+  if (!remoteUrl) {
+    writeStderr(\`No such remote '\${args[2]}'\`);
+    process.exit(2);
+  }
+
+  writeStdout(remoteUrl);
+  process.exit(0);
+}
+
+if (args[0] === 'rev-parse' && args[1] === '--git-path' && args[2] === 'info/exclude') {
+  writeStdout(\`\${TEST_REPO_ROOT}/.git/info/exclude\`);
+  process.exit(0);
+}
+
+if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') {
+  writeStdout(TEST_REPO_ROOT);
   process.exit(0);
 }
 
@@ -518,6 +576,20 @@ function runWithFakeToolPath<T>(path: string | undefined, run: (path: string) =>
   }
 }
 
+async function runWithFakeToolPathAsync<T>(path: string | undefined, run: (path: string) => Promise<T>): Promise<T> {
+  const fakeToolDirectory = path ? null : createFakeToolDirectory()
+  const resolvedPath =
+    path ?? (process.env.PATH ? [fakeToolDirectory, process.env.PATH].join(':') : (fakeToolDirectory ?? ''))
+
+  try {
+    return await run(resolvedPath)
+  } finally {
+    if (fakeToolDirectory) {
+      rmSync(fakeToolDirectory, { force: true, recursive: true })
+    }
+  }
+}
+
 export function getMissingGhPath(): string {
   return mkdtempSync(join(tmpdir(), 'hivectl-gh-missing-'))
 }
@@ -533,6 +605,58 @@ export function runGhPrUnresolvedCli(args: string[], scenario: string, path?: st
         PATH: resolvedPath,
       },
     }),
+  )
+}
+
+export function createGhIssuesFixture(): string {
+  const directory = mkdtempSync(join(tmpdir(), 'hivectl-gh-issues-'))
+
+  mkdirSync(join(directory, '.git', 'info'), { recursive: true })
+
+  return directory
+}
+
+export function runGhIssuesCli(
+  args: string[],
+  cwd: string,
+  env: Record<string, string> = {},
+  scenario = 'gh-issues-multiple-remotes',
+): Promise<AsyncCliResult> {
+  return runWithFakeToolPathAsync(
+    undefined,
+    (resolvedPath) =>
+      new Promise((resolveRun, rejectRun) => {
+        const child = spawn(process.execPath, [join(ROOT, 'src/cli.ts'), 'gh-issues', ...args], {
+          cwd,
+          env: {
+            ...process.env,
+            ...env,
+            HIVECTL_TEST_REPO_ROOT: cwd,
+            HIVECTL_TEST_SCENARIO: scenario,
+            PATH: resolvedPath,
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+        let stderr = ''
+        let stdout = ''
+
+        child.stdout.setEncoding('utf8')
+        child.stderr.setEncoding('utf8')
+        child.stdout.on('data', (chunk) => {
+          stdout += chunk
+        })
+        child.stderr.on('data', (chunk) => {
+          stderr += chunk
+        })
+        child.on('error', rejectRun)
+        child.on('close', (code) => {
+          resolveRun({
+            status: code ?? 1,
+            stderr,
+            stdout,
+          })
+        })
+      }),
   )
 }
 
@@ -634,6 +758,10 @@ type FakeGitHubApi = {
   url: string
 }
 
+type FakeGhIssuesApiOptions = {
+  crossOriginNext?: boolean
+}
+
 function getFakeGitHubApiResponse(pathname: string, baseUrl: string): unknown | null {
   switch (pathname) {
     case '/git-tags/acme-publish-v1.4.0':
@@ -702,6 +830,118 @@ export async function startFakeGitHubApi(): Promise<FakeGitHubApi> {
 
     requests.push(`${requestUrl.pathname}${requestUrl.search}`)
     response.setHeader('content-type', 'application/json')
+
+    if (!body) {
+      response.statusCode = 404
+      response.end(JSON.stringify({ message: `No fake response for ${requestUrl.pathname}` }))
+      return
+    }
+
+    response.end(JSON.stringify(body))
+  })
+
+  await new Promise<void>((resolveListen) => {
+    server.listen(0, '127.0.0.1', resolveListen)
+  })
+
+  const address = server.address() as AddressInfo
+  baseUrl = `http://127.0.0.1:${address.port}`
+
+  return {
+    close: () =>
+      new Promise<void>((resolveClose, rejectClose) => {
+        server.close((error) => {
+          if (error) {
+            rejectClose(error)
+            return
+          }
+
+          resolveClose()
+        })
+      }),
+    requests,
+    url: baseUrl,
+  }
+}
+
+function getFakeGhIssuesApiResponse(pathname: string, requestUrl: URL, baseUrl: string): unknown | null {
+  const issueOne = {
+    body: 'The first issue body mentions offline search and sync.',
+    comments: 1,
+    comments_url: `${baseUrl}/repos/beeman/hivectl/issues/1/comments`,
+    created_at: '2026-05-01T00:00:00Z',
+    html_url: 'https://github.com/beeman/hivectl/issues/1',
+    labels: [{ name: 'bug' }],
+    number: 1,
+    state: 'open',
+    title: 'Offline issue cache',
+    updated_at: '2026-05-01T00:10:00Z',
+    user: { login: 'alice' },
+  }
+  const issueTwo = {
+    body: 'A second cached issue.',
+    comments: 1,
+    comments_url: `${baseUrl}/repos/beeman/hivectl/issues/2/comments`,
+    created_at: '2026-05-02T00:00:00Z',
+    html_url: 'https://github.com/beeman/hivectl/issues/2',
+    labels: [{ name: 'enhancement' }],
+    number: 2,
+    state: 'closed',
+    title: 'Search cached comments',
+    updated_at: '2026-05-02T00:10:00Z',
+    user: { login: 'bob' },
+  }
+  const pullRequestIssue = {
+    ...issueTwo,
+    html_url: 'https://github.com/beeman/hivectl/pull/3',
+    number: 3,
+    pull_request: {},
+    title: 'Pull request should be skipped',
+  }
+
+  switch (pathname) {
+    case '/repos/beeman/hivectl/issues':
+      return requestUrl.searchParams.has('since') ? [] : [issueOne, pullRequestIssue, issueTwo]
+    case '/repos/beeman/hivectl/issues/1/comments':
+      return [
+        {
+          body: 'A cached comment should be searchable without the API.',
+          created_at: '2026-05-01T00:05:00Z',
+          html_url: 'https://github.com/beeman/hivectl/issues/1#issuecomment-10',
+          id: 10,
+          updated_at: '2026-05-01T00:05:00Z',
+          user: { login: 'carol' },
+        },
+      ]
+    case '/repos/beeman/hivectl/issues/2/comments':
+      return [
+        {
+          body: 'Search through cached issue comments.',
+          created_at: '2026-05-02T00:05:00Z',
+          html_url: 'https://github.com/beeman/hivectl/issues/2#issuecomment-20',
+          id: 20,
+          updated_at: '2026-05-02T00:05:00Z',
+          user: { login: 'dave' },
+        },
+      ]
+    default:
+      return null
+  }
+}
+
+export async function startFakeGhIssuesApi(options: FakeGhIssuesApiOptions = {}): Promise<FakeGitHubApi> {
+  const requests: string[] = []
+  let baseUrl = ''
+  const server = createServer((request, response) => {
+    const requestUrl = new URL(request.url ?? '/', baseUrl || 'http://127.0.0.1')
+    const body = getFakeGhIssuesApiResponse(requestUrl.pathname, requestUrl, baseUrl)
+
+    requests.push(`${requestUrl.pathname}${requestUrl.search}`)
+    response.setHeader('content-type', 'application/json')
+
+    if (options.crossOriginNext && requestUrl.pathname === '/repos/beeman/hivectl/issues') {
+      response.setHeader('link', '<https://evil.example/repos/beeman/hivectl/issues?page=2>; rel="next"')
+    }
 
     if (!body) {
       response.statusCode = 404
