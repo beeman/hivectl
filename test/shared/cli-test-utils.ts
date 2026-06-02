@@ -789,6 +789,24 @@ function getFakeGitHubApiResponse(pathname: string, baseUrl: string): unknown | 
       }
     case '/repos/acme/build/tags':
       return [{ name: 'v0.9.0' }, { name: 'v1.0.0+build.5' }]
+    case '/repos/acme/major-only/git/ref/tags/v1':
+      return {
+        object: {
+          sha: PUBLISH_SHA,
+          type: 'commit',
+        },
+      }
+    case '/repos/acme/major-only/tags':
+      return [{ name: 'latest' }, { name: 'v0.4' }, { name: 'v1' }]
+    case '/repos/acme/minor-only/git/ref/tags/v1.2':
+      return {
+        object: {
+          sha: PUBLISH_SHA,
+          type: 'commit',
+        },
+      }
+    case '/repos/acme/minor-only/tags':
+      return [{ name: 'v1.1' }, { name: 'v1.2' }]
     case '/repos/acme/unstable/git/ref/tags/v2.0.0-beta.1':
       return {
         object: {

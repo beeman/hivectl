@@ -6,13 +6,13 @@ import { ghPinActionsUtilParsePositiveInteger } from './util/gh-pin-actions-util
 
 export function ghPinActionsCommand(): Command {
   return new Command('gh-pin-actions')
-    .description('Pin external GitHub Actions uses references to latest stable SemVer commit SHAs')
+    .description('Pin external GitHub Actions uses references to latest stable version tag commit SHAs')
     .argument('[targets...]')
     .option('--api-url <url>', 'GitHub API base URL', GH_PIN_ACTIONS_DEFAULT_API_URL)
     .option('--check', 'exit with a failure when updates would be made without writing files')
     .option('--dry-run', 'print planned updates without writing files')
     .option('--github-token-env <name>', 'environment variable containing a GitHub API token', 'GITHUB_TOKEN')
-    .option('--include-prereleases', 'allow SemVer prerelease or build-metadata tags')
+    .option('--include-prereleases', 'allow SemVer prerelease tags')
     .option('--json', 'show pinning results as JSON')
     .option(
       '--max-tag-pages <number>',

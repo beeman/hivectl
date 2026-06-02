@@ -56,6 +56,38 @@ test('pins external GitHub Actions in multiple files and reports changes in alph
   }
 })
 
+test('pins stable major-only and minor-only GitHub Action tags', async () => {
+  const api = await startFakeGitHubApi()
+  const directory = mkdtempSync(join(tmpdir(), 'hivectl-pin-actions-'))
+  const workflowPath = join(directory, '.github', 'workflows', 'ci.yaml')
+
+  mkdirSync(join(directory, '.github', 'workflows'), { recursive: true })
+  writeFileSync(
+    workflowPath,
+    [
+      'name: CI',
+      'jobs:',
+      '  build:',
+      '    steps:',
+      '      - uses: acme/major-only@main',
+      '      - uses: acme/minor-only@main',
+      '',
+    ].join('\n'),
+  )
+
+  try {
+    const result = await runGhPinActionsCli(['--api-url', api.url], directory)
+
+    expect(result.status).toBe(0)
+    expect(result.stderr.trim()).toBe('')
+    expect(readFileSync(workflowPath, 'utf8')).toContain(`      - uses: acme/major-only@${PUBLISH_SHA} # v1`)
+    expect(readFileSync(workflowPath, 'utf8')).toContain(`      - uses: acme/minor-only@${PUBLISH_SHA} # v1.2`)
+  } finally {
+    rmSync(directory, { force: true, recursive: true })
+    await api.close()
+  }
+})
+
 test('prints planned GitHub Actions updates in dry-run mode without writing files', async () => {
   const api = await startFakeGitHubApi()
   const directory = createGhPinActionsRepo()
@@ -148,7 +180,7 @@ test('prints JSON output for GitHub Actions pinning results', async () => {
   }
 })
 
-test('fails when a GitHub Action has no stable exact SemVer tag', async () => {
+test('fails when a GitHub Action has no stable version tag', async () => {
   const api = await startFakeGitHubApi()
   const directory = mkdtempSync(join(tmpdir(), 'hivectl-pin-actions-'))
 
@@ -163,7 +195,7 @@ test('fails when a GitHub Action has no stable exact SemVer tag', async () => {
 
     expect(result.status).toBe(1)
     expect(result.stdout.trim()).toBe('')
-    expect(result.stderr.trim()).toBe('No stable exact SemVer tag found for acme/unstable')
+    expect(result.stderr.trim()).toBe('No stable version tag found for acme/unstable')
   } finally {
     rmSync(directory, { force: true, recursive: true })
     await api.close()
