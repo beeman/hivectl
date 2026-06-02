@@ -52,6 +52,8 @@ function parseSemver(tag: string, includePrereleases: boolean): SemverSortKey | 
     return null
   }
 
+  const hasMinor = typeof match.groups.minor === 'string'
+  const hasPatch = typeof match.groups.patch === 'string'
   const prerelease = match.groups.prerelease ?? ''
 
   if (prerelease && !includePrereleases) {
@@ -60,9 +62,10 @@ function parseSemver(tag: string, includePrereleases: boolean): SemverSortKey | 
 
   return [
     Number(match.groups.major),
-    Number(match.groups.minor),
-    Number(match.groups.patch),
+    hasMinor ? Number(match.groups.minor) : 0,
+    hasPatch ? Number(match.groups.patch) : 0,
     prerelease ? 0 : 1,
+    hasPatch ? 3 : hasMinor ? 2 : 1,
     tag.startsWith('v') ? 1 : 0,
     tag,
   ]
@@ -125,7 +128,7 @@ async function latestSemverTag(
   }
 
   if (candidates.length === 0) {
-    const exact = includePrereleases ? 'exact SemVer' : 'stable exact SemVer'
+    const exact = includePrereleases ? 'version' : 'stable version'
 
     throw new Error(`No ${exact} tag found for ${repoKey}`)
   }

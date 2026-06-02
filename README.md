@@ -121,7 +121,7 @@ Exit codes:
 
 ### `gh-pin-actions`
 
-Pins external GitHub Actions `uses:` references in `.github` YAML files to the latest stable exact SemVer tag SHA.
+Pins external GitHub Actions `uses:` references in `.github` YAML files to the latest stable version tag SHA.
 
 This command is intentionally scoped to GitHub action references:
 
@@ -152,7 +152,7 @@ Check whether updates are needed without writing files:
 hivectl gh-pin-actions --check
 ```
 
-Allow prerelease or build-metadata SemVer tags:
+Allow prerelease version tags:
 
 ```bash
 hivectl gh-pin-actions --include-prereleases
@@ -170,7 +170,7 @@ Options:
 *   `--check`: Exit with a failure when updates would be made, without writing files.
 *   `--dry-run`: Print planned updates without writing files.
 *   `--github-token-env <name>`: Environment variable containing a GitHub API token. Defaults to `GITHUB_TOKEN`.
-*   `--include-prereleases`: Allow SemVer prerelease or build-metadata tags.
+*   `--include-prereleases`: Allow SemVer prerelease tags.
 *   `--json`: Print machine-readable output.
 *   `--max-tag-pages <number>`: Maximum 100-tag pages to inspect per repository. Defaults to `25`.
 

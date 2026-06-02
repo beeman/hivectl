@@ -49,4 +49,4 @@ export type ResolvedAction = {
   sha: string
   tag: string
 }
-export type SemverSortKey = [number, number, number, number, number, string]
+export type SemverSortKey = [number, number, number, number, number, number, string]
