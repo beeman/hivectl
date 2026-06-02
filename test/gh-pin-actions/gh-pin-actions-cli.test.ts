@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -175,6 +175,83 @@ test('prints JSON output for GitHub Actions pinning results', async () => {
     })
     expect(result.stderr.trim()).toBe('')
   } finally {
+    rmSync(directory, { force: true, recursive: true })
+    await api.close()
+  }
+})
+
+test('reuses the global GitHub Actions resolution cache across runs', async () => {
+  const api = await startFakeGitHubApi()
+  const cacheHome = mkdtempSync(join(tmpdir(), 'hivectl-pin-actions-cache-'))
+  const directory = createGhPinActionsRepo()
+
+  try {
+    const env = { XDG_CACHE_HOME: cacheHome }
+    const first = await runGhPinActionsCli(['--api-url', api.url, '--dry-run'], directory, env)
+    const firstRequestCount = api.requests.length
+    const second = await runGhPinActionsCli(['--api-url', api.url, '--dry-run'], directory, env)
+    const cachePath = join(cacheHome, 'hivectl', 'gh-pin-actions', 'resolved-actions.json')
+
+    expect(first.status).toBe(0)
+    expect(second.status).toBe(0)
+    expect(firstRequestCount).toBeGreaterThan(0)
+    expect(api.requests).toHaveLength(firstRequestCount)
+    expect(existsSync(cachePath)).toBe(true)
+    expect(JSON.parse(readFileSync(cachePath, 'utf8'))).toMatchObject({
+      entries: {},
+      version: 1,
+    })
+  } finally {
+    rmSync(cacheHome, { force: true, recursive: true })
+    rmSync(directory, { force: true, recursive: true })
+    await api.close()
+  }
+})
+
+test('uses fallback GitHub token environment variables', async () => {
+  const api = await startFakeGitHubApi()
+  const cacheHome = mkdtempSync(join(tmpdir(), 'hivectl-pin-actions-cache-'))
+  const directory = createGhPinActionsRepo()
+
+  try {
+    const result = await runGhPinActionsCli(['--api-url', api.url, '--dry-run'], directory, {
+      GH_TOKEN: 'pin-token',
+      GITHUB_TOKEN: undefined,
+      HIVECTL_GITHUB_TOKEN: undefined,
+      XDG_CACHE_HOME: cacheHome,
+    })
+
+    expect(result.status).toBe(0)
+    expect(api.authorizationHeaders.every((header) => header === 'Bearer pin-token')).toBe(true)
+  } finally {
+    rmSync(cacheHome, { force: true, recursive: true })
+    rmSync(directory, { force: true, recursive: true })
+    await api.close()
+  }
+})
+
+test('uses an explicit GitHub token environment variable before fallbacks', async () => {
+  const api = await startFakeGitHubApi()
+  const cacheHome = mkdtempSync(join(tmpdir(), 'hivectl-pin-actions-cache-'))
+  const directory = createGhPinActionsRepo()
+
+  try {
+    const result = await runGhPinActionsCli(
+      ['--api-url', api.url, '--dry-run', '--github-token-env', 'CUSTOM_GH_TOKEN'],
+      directory,
+      {
+        CUSTOM_GH_TOKEN: 'custom-token',
+        GH_TOKEN: 'fallback-token',
+        GITHUB_TOKEN: undefined,
+        HIVECTL_GITHUB_TOKEN: undefined,
+        XDG_CACHE_HOME: cacheHome,
+      },
+    )
+
+    expect(result.status).toBe(0)
+    expect(api.authorizationHeaders.every((header) => header === 'Bearer custom-token')).toBe(true)
+  } finally {
+    rmSync(cacheHome, { force: true, recursive: true })
     rmSync(directory, { force: true, recursive: true })
     await api.close()
   }

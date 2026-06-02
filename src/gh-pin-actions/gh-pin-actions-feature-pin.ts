@@ -1,4 +1,5 @@
 import { sharedUtilNormalizeOutput as normalizeOutput } from '../shared/util/shared-util-output.ts'
+import { ghPinActionsDataGetGlobalCachePath as getGlobalCachePath } from './data-access/gh-pin-actions-data-cache.ts'
 import {
   ghPinActionsDataGitHubJsonApi as GitHubJsonApi,
   ghPinActionsDataResolveActions as resolveActions,
@@ -10,6 +11,7 @@ import {
 } from './data-access/gh-pin-actions-data-workflows.ts'
 import {
   GH_PIN_ACTIONS_DEFAULT_API_URL,
+  GH_PIN_ACTIONS_DEFAULT_CACHE_TTL_SECONDS,
   GH_PIN_ACTIONS_DEFAULT_MAX_TAG_PAGES,
   GH_PIN_ACTIONS_NO_YAML_FILES_EXIT_CODE,
 } from './gh-pin-actions-constants.ts'
@@ -19,6 +21,22 @@ import {
   ghPinActionsUiPrintSummary as printGhPinActionsSummary,
 } from './ui/gh-pin-actions-ui-output.ts'
 import { ghPinActionsUtilGetGhPinActionsMode as getGhPinActionsMode } from './util/gh-pin-actions-util-output.ts'
+
+function resolveToken(githubTokenEnv: string | undefined): string | undefined {
+  const envNames = [githubTokenEnv?.trim() ?? '', 'HIVECTL_GITHUB_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN'].filter(
+    (envName, index, values) => envName.length > 0 && values.indexOf(envName) === index,
+  )
+
+  for (const envName of envNames) {
+    const token = process.env[envName]
+
+    if (token) {
+      return token
+    }
+  }
+
+  return undefined
+}
 
 export async function ghPinActionsFeaturePin(
   targetArguments: string[] | undefined,
@@ -53,16 +71,18 @@ export async function ghPinActionsFeaturePin(
     return 0
   }
 
-  const api = new GitHubJsonApi(
-    normalizeOutput(options.apiUrl) || GH_PIN_ACTIONS_DEFAULT_API_URL,
-    process.env[normalizeOutput(options.githubTokenEnv) || 'GITHUB_TOKEN'],
-  )
-  const resolved = await resolveActions(
-    refs,
-    api,
-    Boolean(options.includePrereleases),
-    options.maxTagPages ?? GH_PIN_ACTIONS_DEFAULT_MAX_TAG_PAGES,
-  )
+  const apiUrl = normalizeOutput(options.apiUrl) || GH_PIN_ACTIONS_DEFAULT_API_URL
+  const maxTagPages = options.maxTagPages ?? GH_PIN_ACTIONS_DEFAULT_MAX_TAG_PAGES
+  const cacheOptions =
+    options.cache === false
+      ? undefined
+      : {
+          apiUrl,
+          cachePath: getGlobalCachePath(),
+          ttlSeconds: options.cacheTtl ?? GH_PIN_ACTIONS_DEFAULT_CACHE_TTL_SECONDS,
+        }
+  const api = new GitHubJsonApi(apiUrl, resolveToken(options.githubTokenEnv))
+  const resolved = await resolveActions(refs, api, Boolean(options.includePrereleases), maxTagPages, cacheOptions)
   const changedByFile = new Map<string, number>()
 
   for (const file of files) {

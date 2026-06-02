@@ -753,6 +753,7 @@ type AsyncCliResult = {
 }
 
 type FakeGitHubApi = {
+  authorizationHeaders: string[]
   close: () => Promise<void>
   requests: string[]
   url: string
@@ -840,12 +841,14 @@ function getFakeGitHubApiResponse(pathname: string, baseUrl: string): unknown | 
 }
 
 export async function startFakeGitHubApi(): Promise<FakeGitHubApi> {
+  const authorizationHeaders: string[] = []
   const requests: string[] = []
   let baseUrl = ''
   const server = createServer((request, response) => {
     const requestUrl = new URL(request.url ?? '/', baseUrl || 'http://127.0.0.1')
     const body = getFakeGitHubApiResponse(requestUrl.pathname, baseUrl)
 
+    authorizationHeaders.push(request.headers.authorization ?? '')
     requests.push(`${requestUrl.pathname}${requestUrl.search}`)
     response.setHeader('content-type', 'application/json')
 
@@ -866,6 +869,7 @@ export async function startFakeGitHubApi(): Promise<FakeGitHubApi> {
   baseUrl = `http://127.0.0.1:${address.port}`
 
   return {
+    authorizationHeaders,
     close: () =>
       new Promise<void>((resolveClose, rejectClose) => {
         server.close((error) => {
@@ -948,12 +952,14 @@ function getFakeGhIssuesApiResponse(pathname: string, requestUrl: URL, baseUrl: 
 }
 
 export async function startFakeGhIssuesApi(options: FakeGhIssuesApiOptions = {}): Promise<FakeGitHubApi> {
+  const authorizationHeaders: string[] = []
   const requests: string[] = []
   let baseUrl = ''
   const server = createServer((request, response) => {
     const requestUrl = new URL(request.url ?? '/', baseUrl || 'http://127.0.0.1')
     const body = getFakeGhIssuesApiResponse(requestUrl.pathname, requestUrl, baseUrl)
 
+    authorizationHeaders.push(request.headers.authorization ?? '')
     requests.push(`${requestUrl.pathname}${requestUrl.search}`)
     response.setHeader('content-type', 'application/json')
 
@@ -978,6 +984,7 @@ export async function startFakeGhIssuesApi(options: FakeGhIssuesApiOptions = {})
   baseUrl = `http://127.0.0.1:${address.port}`
 
   return {
+    authorizationHeaders,
     close: () =>
       new Promise<void>((resolveClose, rejectClose) => {
         server.close((error) => {
@@ -994,11 +1001,27 @@ export async function startFakeGhIssuesApi(options: FakeGhIssuesApiOptions = {})
   }
 }
 
-export function runGhPinActionsCli(args: string[], cwd: string): Promise<AsyncCliResult> {
+export function runGhPinActionsCli(
+  args: string[],
+  cwd: string,
+  env: Record<string, string | undefined> = {},
+): Promise<AsyncCliResult> {
   return new Promise((resolveRun, rejectRun) => {
+    const defaultCacheHome = mkdtempSync(join(tmpdir(), 'hivectl-pin-actions-cache-'))
+    const childEnv: NodeJS.ProcessEnv = { ...process.env, XDG_CACHE_HOME: defaultCacheHome }
+    const cleanupDefaultCache = !('XDG_CACHE_HOME' in env)
+
+    for (const [key, value] of Object.entries(env)) {
+      if (typeof value === 'undefined') {
+        delete childEnv[key]
+      } else {
+        childEnv[key] = value
+      }
+    }
+
     const child = spawn(process.execPath, [join(ROOT, 'src/cli.ts'), 'gh-pin-actions', ...args], {
       cwd,
-      env: process.env,
+      env: childEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let stderr = ''
@@ -1014,6 +1037,10 @@ export function runGhPinActionsCli(args: string[], cwd: string): Promise<AsyncCl
     })
     child.on('error', rejectRun)
     child.on('close', (code) => {
+      if (cleanupDefaultCache) {
+        rmSync(defaultCacheHome, { force: true, recursive: true })
+      }
+
       resolveRun({
         status: code ?? 1,
         stderr,

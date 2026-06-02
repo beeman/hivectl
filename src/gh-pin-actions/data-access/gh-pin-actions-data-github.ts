@@ -1,6 +1,19 @@
 import { sharedUtilParseJson as parseJson } from '../../shared/util/shared-util-json.ts'
 import { GH_PIN_ACTIONS_SEMVER_RE as SEMVER_RE, GH_PIN_ACTIONS_SHA_RE as SHA_RE } from '../gh-pin-actions-constants.ts'
-import type { ActionRef, GitHubRefObject, ResolvedAction, SemverSortKey } from '../gh-pin-actions-types.ts'
+import type {
+  ActionRef,
+  GitHubRefObject,
+  ResolveActionsCacheOptions,
+  ResolvedAction,
+  SemverSortKey,
+} from '../gh-pin-actions-types.ts'
+import {
+  ghPinActionsDataGetCacheKey as getCacheKey,
+  ghPinActionsDataReadCache as readCache,
+  ghPinActionsDataReadResolvedAction as readResolvedAction,
+  ghPinActionsDataSetResolvedAction as setResolvedAction,
+  ghPinActionsDataWriteCache as writeCache,
+} from './gh-pin-actions-data-cache.ts'
 
 class GitHubJsonApi {
   private readonly apiUrl: string
@@ -191,19 +204,41 @@ async function resolveActions(
   api: GitHubJsonApi,
   includePrereleases: boolean,
   maxTagPages: number,
+  cacheOptions?: ResolveActionsCacheOptions,
 ): Promise<Map<string, ResolvedAction>> {
   const resolved = new Map<string, ResolvedAction>()
   const repoKeys = [...new Set(refs.map((ref) => ref.repoKey))].sort((left, right) => left.localeCompare(right))
+  const cache = cacheOptions ? readCache(cacheOptions.cachePath) : null
+  const nowMs = Date.now()
+  let cacheChanged = false
 
   for (const repoKey of repoKeys) {
+    const cacheKey = cacheOptions ? getCacheKey(cacheOptions.apiUrl, repoKey, includePrereleases, maxTagPages) : ''
+    const cached = cache && cacheOptions ? readResolvedAction(cache, cacheKey, cacheOptions.ttlSeconds, nowMs) : null
+
+    if (cached) {
+      resolved.set(repoKey, cached)
+      continue
+    }
+
     const tag = await latestSemverTag(api, repoKey, includePrereleases, maxTagPages)
     const sha = await resolveTagSha(api, repoKey, tag)
-
-    resolved.set(repoKey, {
+    const resolvedAction = {
       repoKey,
       sha,
       tag,
-    })
+    }
+
+    resolved.set(repoKey, resolvedAction)
+
+    if (cache && cacheOptions) {
+      setResolvedAction(cache, cacheKey, resolvedAction, nowMs)
+      cacheChanged = true
+    }
+  }
+
+  if (cache && cacheChanged && cacheOptions) {
+    writeCache(cacheOptions.cachePath, cache)
   }
 
   return resolved

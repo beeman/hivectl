@@ -11,8 +11,22 @@ export type ActionRef = {
 
 export type GhPinActionsMode = 'check' | 'dry_run' | 'write'
 
+export type GhPinActionsCacheEntry = {
+  cachedAt: number
+  repoKey: string
+  sha: string
+  tag: string
+}
+
+export type GhPinActionsCacheFile = {
+  entries: Record<string, GhPinActionsCacheEntry>
+  version: 1
+}
+
 export type GhPinActionsOptions = {
   apiUrl?: string
+  cache?: boolean
+  cacheTtl?: number
   check?: boolean
   dryRun?: boolean
   githubTokenEnv?: string
@@ -42,6 +56,12 @@ export type GitHubRefObject = {
   sha?: unknown
   type?: unknown
   url?: unknown
+}
+
+export type ResolveActionsCacheOptions = {
+  apiUrl: string
+  cachePath: string
+  ttlSeconds: number
 }
 
 export type ResolvedAction = {
