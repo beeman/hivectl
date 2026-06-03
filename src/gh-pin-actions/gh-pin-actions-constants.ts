@@ -1,4 +1,5 @@
 export const GH_PIN_ACTIONS_DEFAULT_API_URL = 'https://api.github.com'
+export const GH_PIN_ACTIONS_DEFAULT_CACHE_TTL_SECONDS = 86_400
 export const GH_PIN_ACTIONS_DEFAULT_MAX_TAG_PAGES = 25
 export const GH_PIN_ACTIONS_NO_YAML_FILES_EXIT_CODE = 2
 export const GH_PIN_ACTIONS_SHA_RE = /^[0-9a-f]{40}$/iu

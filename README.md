@@ -167,12 +167,16 @@ hivectl gh-pin-actions --json
 Options:
 
 *   `--api-url <url>`: GitHub API base URL. Defaults to `https://api.github.com`.
+*   `--cache-ttl <seconds>`: Seconds to reuse cached GitHub action resolutions. Defaults to `86400`.
 *   `--check`: Exit with a failure when updates would be made, without writing files.
 *   `--dry-run`: Print planned updates without writing files.
-*   `--github-token-env <name>`: Environment variable containing a GitHub API token. Defaults to `GITHUB_TOKEN`.
-*   `--include-prereleases`: Allow SemVer prerelease tags.
+*   `--github-token-env <name>`: Environment variable containing a GitHub API token. `HIVECTL_GITHUB_TOKEN`, `GH_TOKEN`, and `GITHUB_TOKEN` are checked by default.
+*   `--include-prereleases`: Allow SemVer prerelease or build-metadata tags.
 *   `--json`: Print machine-readable output.
 *   `--max-tag-pages <number>`: Maximum 100-tag pages to inspect per repository. Defaults to `25`.
+*   `--no-cache`: Bypass the global GitHub action resolution cache.
+
+Resolved action versions are cached globally at `${XDG_CACHE_HOME:-~/.cache}/hivectl/gh-pin-actions/resolved-actions.json`.
 
 Exit codes:
 
