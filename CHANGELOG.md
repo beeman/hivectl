@@ -1,5 +1,17 @@
 # hivectl
 
+## 0.4.0
+
+### Minor Changes
+
+- 1bc9c67: Add gh-issues sync, list, and search commands for caching GitHub issues and comments locally.
+
+### Patch Changes
+
+- 6a3ca1e: Cache gh-pin-actions GitHub action resolutions globally and support token fallback environment variables.
+- f2c0269: Respect gitignore patterns when discovering workspace package.json files for deps list.
+- 341c2b8: Support stable major-only and minor-only GitHub Actions version tags in gh-pin-actions.
+
 ## 0.3.0
 
 ### Minor Changes
